@@ -1,0 +1,602 @@
+// OneWeb — core data model
+//
+// TENANT ISOLATION STRATEGY (read this before adding a model or relation)
+// -------------------------------------------------------------------
+// Every tenant-owned table carries a `businessId` column. That alone is not
+// enough: application code could still accidentally join a Location from
+// Business A onto a Request from Business B. To make that impossible rather
+// than merely "checked", every relationship between two tenant-owned rows
+// uses a COMPOSITE foreign key of the form (businessId, <id>) instead of a
+// bare id-to-id foreign key:
+//
+//   model Department {
+//     id         String @id @default(cuid())
+//     businessId String
+//     @@unique([businessId, id])   // lets other rows reference (businessId, id) together
+//   }
+//
+//   model Service {
+//     businessId   String
+//     departmentId String?
+//     department   Department? @relation(fields: [businessId, departmentId], references: [businessId, id])
+//   }
+//
+// Postgres enforces this FK, so a Service can only ever point at a
+// Department that shares its exact businessId. A cross-tenant reference is
+// a foreign-key violation at the database layer, not just a bug someone
+// could introduce in a query. The cost is one extra unique index per table
+// — cheap insurance for the platform's core invariant (see section 33 of
+// the project instructions: "Business A must never be able to access
+// Business B's data").
+//
+// AuditLog and RequestStatusHistory intentionally do NOT use composite FKs
+// for every reference: an audit trail must survive the deletion of the
+// thing it describes, so entity references there are plain (unenforced)
+// ids plus a businessId for scoping, never a hard FK.
+
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum BusinessType {
+  HOTEL
+  RESORT
+  GUESTHOUSE
+  VILLA
+  RESTAURANT
+  CAFE
+  SALON
+  SPA
+  GYM
+  COWORKING
+  OFFICE
+  APARTMENT
+  EVENT_VENUE
+  OTHER
+}
+
+enum BusinessStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum MembershipRole {
+  BUSINESS_OWNER
+  MANAGER
+  STAFF
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+enum LocationType {
+  ROOM
+  BUILDING
+  FLOOR
+  POOL
+  TABLE
+  BAR
+  PRIVATE_ROOM
+  SPA_ROOM
+  TREATMENT_ROOM
+  CHAIR
+  GYM_AREA
+  EQUIPMENT
+  LOCKER
+  DESK
+  MEETING_ROOM
+  UNIT
+  COMMON_AREA
+  PARKING
+  RECEPTION
+  OTHER
+}
+
+enum LocationStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
+enum GuestStayStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum RequestStatus {
+  NEW
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CLOSED
+  REJECTED
+  CANCELLED
+}
+
+enum RequestPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum QRCodeStatus {
+  ACTIVE
+  DISABLED
+}
+
+// ---------------------------------------------------------------------------
+// Platform / identity
+// ---------------------------------------------------------------------------
+
+/// A human identity on the platform. Not tenant-owned: one User can hold
+/// memberships in several businesses (e.g. a consultant, or a chain owner).
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships             BusinessMembership[]
+  createdGuestStays       GuestStay[]             @relation("GuestStayCreatedByUser")
+  requestsCreatedAsStaff  Request[]               @relation("RequestCreatedByStaff")
+  requestStatusChanges    RequestStatusHistory[]  @relation("RequestStatusChangedByUser")
+  uploadedAttachments     Attachment[]            @relation("AttachmentUploadedByUser")
+  auditLogEntries         AuditLog[]              @relation("AuditLogActorUser")
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Business (tenant root)
+// ---------------------------------------------------------------------------
+
+/// The tenant root. Every tenant-owned row ultimately points back here.
+model Business {
+  id            String         @id @default(cuid())
+  slug          String         @unique
+  name          String
+  type          BusinessType
+  status        BusinessStatus @default(TRIAL)
+  timezone      String         @default("UTC")
+  currency      String         @default("USD")
+  defaultLocale String         @default("en")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  settings      BusinessSettings?
+  memberships   BusinessMembership[]
+  locations     Location[]
+  departments   Department[]
+  services      Service[]
+  qrCodes       QRCode[]
+  guests        Guest[]
+  guestStays    GuestStay[]
+  guestSessions GuestSession[]
+  requests      Request[]
+  statusHistory RequestStatusHistory[]
+  feedback      Feedback[]
+  attachments   Attachment[]
+  auditLogs     AuditLog[]
+
+  @@index([status])
+  @@map("businesses")
+}
+
+/// Branding, contact info and feature flags. Split from Business so the
+/// tenant-identity row stays small and this can grow (section 26/27) without
+/// touching the core record.
+model BusinessSettings {
+  id               String   @id @default(cuid())
+  businessId       String   @unique
+  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  logoUrl          String?
+  coverImageUrl    String?
+  primaryColor     String?
+  secondaryColor   String?
+  welcomeMessage   String?
+  address          String?
+  phone            String?
+  contactEmail     String?
+  website          String?
+  description      String?
+  supportedLocales String[] @default(["en"])
+  /// Per-business module toggles, e.g. { "guestStays": true, "ordering": false }
+  featureFlags     Json     @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("business_settings")
+}
+
+/// Links a User to a Business with a role. This is the ONLY way a staff
+/// user gets access to a tenant's data — authorization always resolves
+/// through an ACTIVE membership, never through the user id alone.
+model BusinessMembership {
+  id           String           @id @default(cuid())
+  businessId   String
+  business     Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         MembershipRole
+  status       MembershipStatus @default(ACTIVE)
+  departmentId String?
+  department   Department?      @relation(fields: [businessId, departmentId], references: [businessId, id])
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  assignedRequests Request[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, userId])
+  @@index([businessId, role, status])
+  @@map("business_memberships")
+}
+
+// ---------------------------------------------------------------------------
+// Locations, departments, services
+// ---------------------------------------------------------------------------
+
+/// A generic, hierarchical place within a business. Never call this "Room" —
+/// see section 12: the same entity models a hotel room, a restaurant table,
+/// a salon chair, an office desk, etc.
+model Location {
+  id               String         @id @default(cuid())
+  businessId       String
+  business         Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  parentLocationId String?
+  parentLocation   Location?      @relation("LocationHierarchy", fields: [businessId, parentLocationId], references: [businessId, id])
+  children         Location[]     @relation("LocationHierarchy")
+  name             String
+  type             LocationType
+  status           LocationStatus @default(ACTIVE)
+  description      String?
+  metadata         Json           @default("{}")
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  qrCodes    QRCode[]
+  requests   Request[]
+  guestStays GuestStay[]
+
+  @@unique([businessId, id])
+  @@index([businessId, type])
+  @@index([businessId, parentLocationId])
+  @@map("locations")
+}
+
+model Department {
+  id          String   @id @default(cuid())
+  businessId  String
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  memberships BusinessMembership[]
+  services    Service[]
+  requests    Request[]
+
+  @@unique([businessId, id])
+  @@unique([businessId, name])
+  @@map("departments")
+}
+
+model Service {
+  id               String          @id @default(cuid())
+  businessId       String
+  business         Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  departmentId     String?
+  department       Department?     @relation(fields: [businessId, departmentId], references: [businessId, id])
+  name             String
+  description      String?
+  icon             String?
+  category         String?
+  defaultPriority  RequestPriority @default(NORMAL)
+  estimatedMinutes Int?
+  price            Decimal?        @db.Decimal(12, 2)
+  isActive         Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  requests Request[]
+
+  @@unique([businessId, id])
+  @@index([businessId, isActive])
+  @@map("services")
+}
+
+// ---------------------------------------------------------------------------
+// QR codes
+// ---------------------------------------------------------------------------
+
+/// A QR code identifies a Location — nothing more. It is not a credential.
+/// `tokenHash` is the SHA-256 hash of a cryptographically random token; the
+/// raw token is only ever shown at creation time and encoded into the QR
+/// image, never stored. See lib/security/qr-token.ts for the resolution
+/// checklist (spec section 6).
+model QRCode {
+  id            String       @id @default(cuid())
+  businessId    String
+  business      Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  locationId    String
+  location      Location     @relation(fields: [businessId, locationId], references: [businessId, id])
+  tokenHash     String       @unique
+  status        QRCodeStatus @default(ACTIVE)
+  label         String?
+  scanCount     Int          @default(0)
+  lastScannedAt DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  guestSessions GuestSession[]
+
+  @@unique([businessId, id])
+  @@index([businessId, locationId])
+  @@map("qr_codes")
+}
+
+// ---------------------------------------------------------------------------
+// Guests, stays, sessions
+// ---------------------------------------------------------------------------
+
+/// A guest/customer identity. Deliberately lightweight — no password, no
+/// login. Access is granted entirely through an active GuestStay +
+/// GuestSession, and revoked at checkout (section 4/7).
+model Guest {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  fullName   String
+  email      String?
+  phone      String?
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  stays               GuestStay[]
+  requestsCreated     Request[]              @relation("RequestCreatedByGuest")
+  statusChangesAsGuest RequestStatusHistory[] @relation("RequestStatusChangedByGuest")
+  attachmentsUploaded Attachment[]           @relation("AttachmentUploadedByGuest")
+  feedbackGiven       Feedback[]
+
+  @@unique([businessId, id])
+  @@index([businessId, email])
+  @@map("guests")
+}
+
+/// The temporary authorization window for a guest at a business (spec
+/// section 4). Everything guest-facing hangs off an ACTIVE GuestStay;
+/// checkout flips status to EXPIRED and access is revoked, but the row
+/// (and its requests/feedback) is retained for history/analytics.
+model GuestStay {
+  id               String          @id @default(cuid())
+  businessId       String
+  business         Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  guestId          String
+  guest            Guest           @relation(fields: [businessId, guestId], references: [businessId, id])
+  locationId       String?
+  location         Location?       @relation(fields: [businessId, locationId], references: [businessId, id])
+  checkInAt        DateTime        @default(now())
+  checkOutAt       DateTime
+  actualCheckOutAt DateTime?
+  status           GuestStayStatus @default(ACTIVE)
+  createdByUserId  String?
+  createdByUser    User?           @relation("GuestStayCreatedByUser", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  sessions GuestSession[]
+  requests Request[]
+  feedback Feedback[]
+
+  @@unique([businessId, id])
+  @@index([businessId, status])
+  @@index([businessId, locationId])
+  @@map("guest_stays")
+}
+
+/// A guest's browser session, scoped to one GuestStay. `tokenHash` is the
+/// SHA-256 hash of the opaque bearer token stored in the guest's secure
+/// cookie — the raw token is never persisted server-side. See
+/// lib/security/guest-session-token.ts.
+model GuestSession {
+  id             String    @id @default(cuid())
+  businessId     String
+  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  guestStayId    String
+  guestStay      GuestStay @relation(fields: [businessId, guestStayId], references: [businessId, id])
+  tokenHash      String    @unique
+  originQrCodeId String?
+  originQrCode   QRCode?   @relation(fields: [businessId, originQrCodeId], references: [businessId, id])
+  issuedAt       DateTime  @default(now())
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  lastSeenAt     DateTime?
+  userAgent      String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([businessId, id])
+  @@index([businessId, guestStayId])
+  @@map("guest_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+/// What the guest/customer wants (spec section 10 — distinct from a future
+/// Task model that would represent the operational work breakdown).
+model Request {
+  id                   String              @id @default(cuid())
+  businessId           String
+  business             Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  guestStayId          String?
+  guestStay            GuestStay?          @relation(fields: [businessId, guestStayId], references: [businessId, id])
+  locationId           String
+  location             Location            @relation(fields: [businessId, locationId], references: [businessId, id])
+  serviceId            String?
+  service              Service?            @relation(fields: [businessId, serviceId], references: [businessId, id])
+  departmentId         String?
+  department           Department?         @relation(fields: [businessId, departmentId], references: [businessId, id])
+  assignedMembershipId String?
+  assignedMembership   BusinessMembership? @relation(fields: [businessId, assignedMembershipId], references: [businessId, id])
+  title                String
+  description          String?
+  priority             RequestPriority     @default(NORMAL)
+  status               RequestStatus       @default(NEW)
+  createdByGuestId     String?
+  createdByGuest       Guest?              @relation("RequestCreatedByGuest", fields: [businessId, createdByGuestId], references: [businessId, id])
+  createdByUserId      String?
+  createdByUser        User?               @relation("RequestCreatedByStaff", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  acceptedAt           DateTime?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  closedAt             DateTime?
+  dueAt                DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  statusHistory RequestStatusHistory[]
+  attachments   Attachment[]
+  feedback      Feedback[]
+
+  @@unique([businessId, id])
+  @@index([businessId, status])
+  @@index([businessId, departmentId, status])
+  @@index([businessId, assignedMembershipId, status])
+  @@index([businessId, locationId])
+  @@index([businessId, createdAt])
+  @@map("requests")
+}
+
+/// An immutable record of every status transition (spec section 9: "Every
+/// important status transition should be recorded"). Intentionally NOT a
+/// composite FK to Request beyond requestId+businessId scoping — history
+/// rows must remain queryable/auditable even in edge cases where the
+/// referenced actor (user/guest) has since been removed.
+model RequestStatusHistory {
+  id               String         @id @default(cuid())
+  businessId       String
+  business         Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  requestId        String
+  request          Request        @relation(fields: [businessId, requestId], references: [businessId, id])
+  fromStatus       RequestStatus?
+  toStatus         RequestStatus
+  changedByUserId  String?
+  changedByUser    User?          @relation("RequestStatusChangedByUser", fields: [changedByUserId], references: [id], onDelete: SetNull)
+  changedByGuestId String?
+  changedByGuest   Guest?         @relation("RequestStatusChangedByGuest", fields: [businessId, changedByGuestId], references: [businessId, id])
+  note             String?
+  createdAt        DateTime       @default(now())
+
+  @@index([businessId, requestId, createdAt])
+  @@map("request_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// Feedback & attachments
+// ---------------------------------------------------------------------------
+
+model Feedback {
+  id          String     @id @default(cuid())
+  businessId  String
+  business    Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  requestId   String?
+  request     Request?   @relation(fields: [businessId, requestId], references: [businessId, id])
+  guestStayId String?
+  guestStay   GuestStay? @relation(fields: [businessId, guestStayId], references: [businessId, id])
+  guestId     String?
+  guest       Guest?     @relation(fields: [businessId, guestId], references: [businessId, id])
+  /// 1-5. Enforced in the application/validation layer (Prisma has no
+  /// portable CHECK constraint at this version); consider a raw SQL CHECK
+  /// migration once the schema stabilizes.
+  rating      Int
+  comment     String?
+  categories  String[]   @default([])
+  createdAt   DateTime   @default(now())
+
+  @@unique([businessId, id])
+  @@index([businessId, requestId])
+  @@index([businessId, rating])
+  @@map("feedback")
+}
+
+/// File metadata only — actual bytes live in object storage (spec
+/// section 22). `storageKey` is the object key/path, never a public URL.
+model Attachment {
+  id               String   @id @default(cuid())
+  businessId       String
+  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  requestId        String?
+  request          Request? @relation(fields: [businessId, requestId], references: [businessId, id])
+  uploaderUserId   String?
+  uploaderUser     User?    @relation("AttachmentUploadedByUser", fields: [uploaderUserId], references: [id], onDelete: SetNull)
+  uploaderGuestId  String?
+  uploaderGuest    Guest?   @relation("AttachmentUploadedByGuest", fields: [businessId, uploaderGuestId], references: [businessId, id])
+  storageKey       String
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  createdAt        DateTime @default(now())
+
+  @@unique([businessId, id])
+  @@index([businessId, requestId])
+  @@map("attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+/// Append-only record of sensitive operations (spec section 34).
+/// `businessId` is nullable to allow platform-level (SUPER_ADMIN) entries
+/// not scoped to a single tenant. `entityId` is a plain string, not a FK:
+/// an audit entry must remain readable even after the entity it describes
+/// is deleted.
+model AuditLog {
+  id          String    @id @default(cuid())
+  businessId  String?
+  /// SetNull, not Cascade: audit history must outlive the tenant it
+  /// describes (e.g. for compliance after a business offboards). Every
+  /// other tenant-owned table cascades on Business deletion; this is the
+  /// deliberate exception.
+  business    Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  actorUserId String?
+  actorUser   User?     @relation("AuditLogActorUser", fields: [actorUserId], references: [id], onDelete: SetNull)
+  /// "user" | "guest" | "system" | "platform" — kept as a plain string
+  /// rather than an enum so new actor kinds don't require a migration.
+  actorType   String
+  action      String
+  entityType  String
+  entityId    String?
+  oldValue    Json?
+  newValue    Json?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+
+  @@index([businessId, entityType, entityId])
+  @@index([businessId, createdAt])
+  @@map("audit_logs")
+}
