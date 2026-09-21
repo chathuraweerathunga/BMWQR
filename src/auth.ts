@@ -30,6 +30,7 @@ const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60_000;
 export const { handlers, auth, signIn, signOut } = NextAuth({
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
+  trustHost: true,
   providers: [
     Credentials({
       name: "credentials",
