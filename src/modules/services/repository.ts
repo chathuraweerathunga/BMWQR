@@ -54,3 +54,10 @@ export async function setServiceActive(businessId: string, serviceId: string, is
     data: { isActive },
   });
 }
+
+export type UpdateServiceInput = Partial<Omit<CreateServiceInput, "businessId">>;
+
+/** Tenant-scoped update; the composite FK keeps departmentId in-tenant. */
+export async function updateService(businessId: string, serviceId: string, patch: UpdateServiceInput) {
+  return prisma.service.updateMany({ where: { id: serviceId, businessId }, data: patch });
+}

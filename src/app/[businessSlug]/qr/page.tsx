@@ -1,161 +1,165 @@
 import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import type { Metadata } from "next";
+import { QrCode } from "lucide-react";
 import { getStaffContext } from "@/lib/staff-context";
+import { permissionsForActor } from "@/modules/auth/permissions";
 import { listQrCodesForBusiness } from "@/modules/qr/repository";
 import { listLocationsForBusiness } from "@/modules/locations/repository";
-import { createQr, regenerateQr, setQrStatus } from "@/modules/qr/service";
-import { AuthorizationError } from "@/modules/auth/types";
-import { NotFoundError } from "@/lib/errors";
-import { QrCreateForm } from "./QrCreateForm";
-import { RegenerateButton } from "./RegenerateButton";
+import { createQr, createQrForUncoveredLocations, NO_QR_BY_DEFAULT, regenerateQr, setQrStatus } from "@/modules/qr/service";
+import { runAction, textField } from "@/lib/actions";
+import { formatDateTime, timeAgo } from "@/lib/format";
+import { EmptyState, PageHeader, Panel, PanelHeader } from "@/components/ui/Layout";
+import { SubmitButton } from "@/components/ui/SubmitButton";
+import { cn } from "@/lib/cn";
+import { QrWorkbench, ReplaceCodeButton } from "./QrWorkbench";
 import type { QrRevealState } from "./types";
 
-export default async function QrManagementPage({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ businessSlug: string }>;
-  searchParams: Promise<{ error?: string }>;
-}) {
-  const { businessSlug } = await params;
-  const { error } = await searchParams;
-  const { business, actor } = await getStaffContext(businessSlug);
+export const metadata: Metadata = { title: "QR codes" };
 
-  // Route-level guard: the layout only hides the nav link for STAFF, it
-  // doesn't block direct navigation. `createQr`/`regenerateQr`/`setQrStatus`
-  // all re-check `qr:manage` via `assertAuthorized` regardless, so this is
-  // about a clean redirect instead of an uncaught AuthorizationError inside
-  // a `useActionState` action, not the actual security boundary.
-  if (actor.role !== "BUSINESS_OWNER" && actor.role !== "MANAGER") {
-    redirect(`/${businessSlug}/dashboard`);
-  }
+export default async function QrManagementPage({ params }: { params: Promise<{ businessSlug: string }> }) {
+  const { businessSlug } = await params;
+  const { business, actor } = await getStaffContext(businessSlug);
+  if (!permissionsForActor(actor).has("qr:manage")) redirect(`/${businessSlug}/dashboard`);
 
   const [qrCodes, locations] = await Promise.all([
     listQrCodesForBusiness(business.id),
     listLocationsForBusiness(business.id),
   ]);
+  const path = `/${businessSlug}/qr`;
+  const active = locations.filter((l: { status: string }) => l.status === "ACTIVE") as Array<{ id: string; name: string; type: string }>;
+  const covered = new Set(
+    qrCodes.filter((q: { status: string }) => q.status === "ACTIVE").map((q: { locationId: string }) => q.locationId),
+  );
+  const uncoveredCount = active.filter((l) => !covered.has(l.id) && !NO_QR_BY_DEFAULT.has(l.type)).length;
+  const natural = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, undefined, { numeric: true });
 
-  // Both actions below are defined inline so they can close over `actor` and
-  // `business.id` — never trusting a business/actor id supplied by the
-  // client — and match the `(prevState, formData) => Promise<QrRevealState |
-  // null>` signature `useActionState` expects. Neither redirects on success:
-  // the raw token/URL must be shown to the staff member inline, once, and a
-  // redirect would either lose it or leak it into browser history via the
-  // URL.
-  async function createQrAction(
-    _prevState: QrRevealState | null,
-    formData: FormData,
-  ): Promise<QrRevealState | null> {
+  // These return the new codes in the action's response and never redirect:
+  // the raw token must not end up in a URL or browser history.
+  async function createOne(_prev: QrRevealState, formData: FormData): Promise<QrRevealState> {
     "use server";
-    const locationId = formData.get("locationId");
-    const label = formData.get("label");
-    if (typeof locationId !== "string" || locationId.length === 0) return null;
-
-    const result = await createQr(actor, {
-      locationId,
-      label: typeof label === "string" && label.length > 0 ? label : null,
+    const locationId = textField(formData, "locationId");
+    let reveal: QrRevealState = { codes: [] };
+    const result = await runAction("qr.create", async () => {
+      if (!locationId) throw new Error("missing location");
+      const qr = await createQr(actor, { locationId, label: textField(formData, "label") });
+      const name = active.find((l) => l.id === locationId)?.name ?? "Location";
+      reveal = { codes: [{ locationName: name, url: qr.url, imageDataUrl: qr.imageDataUrl }] };
     });
-    return { url: result.url, imageDataUrl: result.imageDataUrl };
+    revalidatePath(path);
+    return result.error ? { codes: [], error: result.error } : reveal;
   }
 
-  async function regenerateQrAction(
-    _prevState: QrRevealState | null,
-    formData: FormData,
-  ): Promise<QrRevealState | null> {
+  async function createAll(): Promise<QrRevealState> {
     "use server";
-    const qrCodeId = formData.get("qrCodeId");
-    if (typeof qrCodeId !== "string") return null;
-    return regenerateQr(actor, qrCodeId);
+    let codes: QrRevealState["codes"] = [];
+    const result = await runAction("qr.bulk", async () => {
+      codes = await createQrForUncoveredLocations(actor);
+    });
+    revalidatePath(path);
+    return result.error ? { codes: [], error: result.error } : { codes };
   }
 
-  async function setStatusAction(formData: FormData) {
+  async function regenerate(_prev: QrRevealState, formData: FormData): Promise<QrRevealState> {
     "use server";
-    const qrCodeId = formData.get("qrCodeId");
-    const status = formData.get("status");
-    if (typeof qrCodeId !== "string" || (status !== "ACTIVE" && status !== "DISABLED")) return;
+    const qrCodeId = textField(formData, "qrCodeId");
+    const row = qrCodes.find((q: { id: string }) => q.id === qrCodeId);
+    let reveal: QrRevealState = { codes: [] };
+    const result = await runAction("qr.regenerate", async () => {
+      if (!qrCodeId) throw new Error("missing code");
+      const qr = await regenerateQr(actor, qrCodeId);
+      const name = row?.location?.name ?? "Location";
+      reveal = {
+        codes: [{ locationName: name, url: qr.url, imageDataUrl: qr.imageDataUrl }],
+        message: `New code for ${name}. The old printed code no longer works.`,
+      };
+    });
+    revalidatePath(path);
+    return result.error ? { codes: [], error: result.error } : reveal;
+  }
 
-    try {
+  async function setStatus(formData: FormData) {
+    "use server";
+    const qrCodeId = textField(formData, "qrCodeId");
+    const status = textField(formData, "status");
+    if (!qrCodeId || (status !== "ACTIVE" && status !== "DISABLED")) return;
+    await runAction("qr.status", async () => {
       await setQrStatus(actor, qrCodeId, status);
-    } catch (err) {
-      const message =
-        err instanceof AuthorizationError
-          ? "NOT_ALLOWED"
-          : err instanceof NotFoundError
-            ? "NOT_FOUND"
-            : "UNKNOWN";
-      redirect(`/${businessSlug}/qr?error=${message}`);
-    }
-    redirect(`/${businessSlug}/qr`);
+    });
+    revalidatePath(path);
   }
+
+  const rows = [...qrCodes].sort((a: { location: { name: string } | null }, b: { location: { name: string } | null }) =>
+    natural({ name: a.location?.name ?? "" }, { name: b.location?.name ?? "" }),
+  );
+
+  const existing = (
+    <Panel className="overflow-hidden">
+      <PanelHeader
+        title="Codes in use"
+        description="A code only identifies the location. Guests still need an active stay to send requests."
+      />
+      {rows.length === 0 ? (
+        <div className="p-5">
+          <EmptyState icon={<QrCode className="size-6" />} title="No QR codes yet">
+            {active.length ? "Create codes for your rooms above, then print and place them." : "Add locations first. Each code points to one location."}
+          </EmptyState>
+        </div>
+      ) : (
+        <ul className="divide-y divide-line">
+          {rows.map(
+            (qr: {
+              id: string;
+              status: string;
+              label: string | null;
+              scanCount: number;
+              lastScannedAt: Date | null;
+              location: { name: string } | null;
+            }) => (
+              <li key={qr.id} className={cn("flex flex-wrap items-center gap-3 px-5 py-3", qr.status !== "ACTIVE" && "bg-paper")}>
+                <QrCode className={cn("size-5 shrink-0", qr.status === "ACTIVE" ? "text-lagoon-700" : "text-ink-faint")} aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className={cn("truncate font-bold", qr.status !== "ACTIVE" && "text-ink-faint")}>
+                    {qr.location?.name ?? "Unknown location"}
+                    {qr.label && qr.label !== qr.location?.name && <span className="ml-1.5 font-normal text-ink-faint">{qr.label}</span>}
+                    {qr.status !== "ACTIVE" && <span className="ml-2 text-xs font-semibold text-danger">Disabled</span>}
+                  </p>
+                  <p className="text-[13px] text-ink-faint" title={qr.lastScannedAt ? formatDateTime(qr.lastScannedAt, business.timezone) : undefined}>
+                    {qr.scanCount} scan{qr.scanCount === 1 ? "" : "s"}
+                    {qr.lastScannedAt ? `, last ${timeAgo(qr.lastScannedAt)}` : ", not scanned yet"}
+                  </p>
+                </div>
+                <ReplaceCodeButton qrCodeId={qr.id} locationName={qr.location?.name ?? "this location"} />
+                <form action={setStatus}>
+                  <input type="hidden" name="qrCodeId" value={qr.id} />
+                  <input type="hidden" name="status" value={qr.status === "ACTIVE" ? "DISABLED" : "ACTIVE"} />
+                  <SubmitButton variant={qr.status === "ACTIVE" ? "ghost" : "secondary"} size="sm" pendingLabel="Saving">
+                    {qr.status === "ACTIVE" ? "Disable" : "Enable"}
+                  </SubmitButton>
+                </form>
+              </li>
+            ),
+          )}
+        </ul>
+      )}
+    </Panel>
+  );
 
   return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-lg font-semibold">QR codes</h1>
-
-      {error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
-          That action couldn&apos;t be completed ({error}).
-        </p>
-      )}
-
-      {locations.length === 0 ? (
-        <p className="text-sm text-gray-500">
-          Create a location first — a QR code always identifies one specific location.
-        </p>
-      ) : (
-        <QrCreateForm action={createQrAction} locations={locations} />
-      )}
-
-      <ul className="flex flex-col gap-3">
-        {qrCodes.length === 0 && <p className="text-sm text-gray-500">No QR codes yet.</p>}
-        {qrCodes.map((qr: (typeof qrCodes)[number]) => (
-          <li
-            key={qr.id}
-            className="flex flex-col gap-3 rounded border border-gray-200 px-4 py-3 sm:flex-row sm:items-start sm:justify-between"
-          >
-            <div>
-              <p className="text-sm font-medium">
-                {qr.location?.name ?? "Unknown location"}
-                {qr.label ? ` · ${qr.label}` : ""}
-                <span
-                  className={`ml-2 rounded px-2 py-0.5 text-xs ${
-                    qr.status === "ACTIVE"
-                      ? "bg-green-100 text-green-700"
-                      : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {qr.status}
-                </span>
-              </p>
-              <p className="text-xs text-gray-500">
-                {qr.scanCount} scan{qr.scanCount === 1 ? "" : "s"}
-                {qr.lastScannedAt
-                  ? ` · last scanned ${qr.lastScannedAt.toLocaleString()}`
-                  : " · never scanned"}
-              </p>
-            </div>
-
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex gap-2">
-                <RegenerateButton action={regenerateQrAction} qrCodeId={qr.id} />
-                <form action={setStatusAction}>
-                  <input type="hidden" name="qrCodeId" value={qr.id} />
-                  <input
-                    type="hidden"
-                    name="status"
-                    value={qr.status === "ACTIVE" ? "DISABLED" : "ACTIVE"}
-                  />
-                  <button
-                    type="submit"
-                    className="rounded border border-gray-300 px-3 py-1 text-xs font-medium"
-                  >
-                    {qr.status === "ACTIVE" ? "Disable" : "Enable"}
-                  </button>
-                </form>
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <>
+      <PageHeader
+        title="QR codes"
+        description="Place a code in each room and area. Scanning it tells the team where the guest is."
+      />
+      <QrWorkbench
+        createOne={createOne}
+        createAll={createAll}
+        regenerate={regenerate}
+        locations={[...active].sort(natural)}
+        uncoveredCount={uncoveredCount}
+        businessName={business.name}
+        existing={existing}
+      />
+    </>
   );
 }

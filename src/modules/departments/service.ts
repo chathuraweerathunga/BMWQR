@@ -23,6 +23,7 @@ export async function createDepartment(
 
   const name = input.name.trim();
   if (!name) throw new ValidationError("Department name is required.");
+  if (name.length > 60) throw new ValidationError("Keep the department name under 60 characters.");
 
   const existing = await repo.getDepartmentByName(actor.businessId, name);
   if (existing) throw new ValidationError("A department with that name already exists.");
@@ -59,6 +60,7 @@ export async function updateDepartment(
   if (patch.name !== undefined) {
     const name = patch.name.trim();
     if (!name) throw new ValidationError("Department name is required.");
+    if (name.length > 60) throw new ValidationError("Keep the department name under 60 characters.");
     if (name !== current.name) {
       const existing = await repo.getDepartmentByName(actor.businessId, name);
       if (existing) throw new ValidationError("A department with that name already exists.");

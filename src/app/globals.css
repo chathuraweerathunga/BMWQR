@@ -1,24 +1,164 @@
 @import "tailwindcss";
+@import "@fontsource-variable/manrope";
+@import "@fontsource-variable/fraunces";
+
+/*
+ * OneWeb design tokens.
+ *
+ * Palette: a deep lagoon green for the platform's own chrome, brass for
+ * the one accent (the front-desk service bell), cool grey-green paper for
+ * surfaces. Request statuses get their own functional colors, used ONLY
+ * for status so they always mean the same thing.
+ *
+ * Tenant branding: guest-facing pages override --brand / --brand-ink with
+ * the business's own colors (see components/guest/BrandStyle.tsx), so the
+ * portal feels like the hotel's app, not OneWeb's.
+ */
+@theme {
+  --font-sans: "Manrope Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces Variable", ui-serif, Georgia, serif;
+
+  --color-paper: #f4f6f5;
+  --color-surface: #ffffff;
+  --color-sunken: #eaeeec;
+  --color-line: #d9e0dd;
+  --color-line-strong: #b9c4c0;
+  --color-ink: #15201e;
+  --color-ink-soft: #4a5854;
+  --color-ink-faint: #7b8884;
+
+  --color-lagoon-50: #ecf5f3;
+  --color-lagoon-100: #d3e8e4;
+  --color-lagoon-200: #a8d1c9;
+  --color-lagoon-500: #2a7a6f;
+  --color-lagoon-600: #1d6258;
+  --color-lagoon-700: #144c45;
+  --color-lagoon-800: #0f3a35;
+  --color-lagoon-900: #0a2825;
+
+  --color-brass-100: #f6ecd6;
+  --color-brass-300: #e2c07a;
+  --color-brass-500: #b8862b;
+  --color-brass-700: #7d5a17;
+
+  /* Request statuses */
+  --color-st-new: #2459c9;
+  --color-st-new-bg: #e7eefc;
+  --color-st-accepted: #6a3fb5;
+  --color-st-accepted-bg: #efe8fa;
+  --color-st-progress: #a15c07;
+  --color-st-progress-bg: #fcf0dc;
+  --color-st-done: #1b7a44;
+  --color-st-done-bg: #e2f4e9;
+  --color-st-stopped: #5d6966;
+  --color-st-stopped-bg: #eceeed;
+
+  --color-danger: #b42318;
+  --color-danger-bg: #fdecea;
+
+  --radius-control: 10px;
+  --radius-panel: 16px;
+  --radius-sheet: 24px;
+
+  --shadow-panel: 0 1px 2px rgb(21 32 30 / 0.05), 0 1px 1px rgb(21 32 30 / 0.03);
+  --shadow-lift: 0 10px 30px -12px rgb(15 58 53 / 0.28);
+}
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --brand: var(--color-lagoon-700);
+  --brand-ink: #ffffff;
+  --brand-soft: var(--color-lagoon-50);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Visible, consistent keyboard focus everywhere. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brass-500);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--color-brass-300);
+  color: var(--color-ink);
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-variation-settings: "SOFT" 50, "WONK" 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The one orchestrated motion: a request ticket arriving. */
+@keyframes ticket-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-ticket-in {
+  animation: ticket-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Printing a QR sheet: only the sheet prints, everything else is hidden. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+  }
+  .print-card {
+    break-inside: avoid;
+  }
+  @page {
+    margin: 12mm;
+  }
 }

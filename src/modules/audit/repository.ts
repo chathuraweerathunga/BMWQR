@@ -13,15 +13,24 @@ export async function recordAuditEntry(entry: AuditEntry) {
       entityId: entry.entityId ?? null,
       oldValue: (entry.oldValue as Prisma.InputJsonValue | null | undefined) ?? undefined,
       newValue: (entry.newValue as Prisma.InputJsonValue | null | undefined) ?? undefined,
+      ipAddress: entry.ipAddress ?? null,
+      userAgent: entry.userAgent ?? null,
     },
   });
 }
 
-/** For a future "Audit log" screen (`business:view_audit_log`, already in
- * the permission matrix) — not yet wired to a page in this milestone. */
-export async function listAuditLogForBusiness(businessId: string, params: { limit?: number } = {}) {
+/** Newest first, with the acting user's name. `before` pages backwards. */
+export async function listAuditLogForBusiness(
+  businessId: string,
+  params: { limit?: number; before?: Date; actionPrefix?: string } = {},
+) {
   return prisma.auditLog.findMany({
-    where: { businessId },
+    where: {
+      businessId,
+      ...(params.before ? { createdAt: { lt: params.before } } : {}),
+      ...(params.actionPrefix ? { action: { startsWith: params.actionPrefix } } : {}),
+    },
+    include: { actorUser: { select: { name: true } } },
     orderBy: { createdAt: "desc" },
     take: params.limit ?? 100,
   });

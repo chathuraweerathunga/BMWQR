@@ -1,12 +1,12 @@
 import { assertAuthorized } from "@/modules/auth/authorize";
 import type { StaffActor } from "@/modules/auth/types";
 import { getFeedbackSummaryForBusiness, listFeedbackForBusiness } from "@/modules/feedback/repository";
-import { computeAverageTimings, isOverdue } from "./metrics";
+import { computeAverageTimings, DEFAULT_OVERDUE_MINUTES, isOverdue } from "./metrics";
 import * as repo from "./repository";
+import { utcToZonedLocal } from "@/lib/format";
 
 /** Requests older than this with no `dueAt` set are counted as overdue —
  * see metrics.ts `isOverdue` for why a flat fallback exists at all. */
-const DEFAULT_OVERDUE_MINUTES = 60;
 /** How far back "average response/completion time" and "department
  * performance" look. Kept short and fixed for the MVP — a manager-selected
  * date range is a V2 refinement (project instructions section 42). */
@@ -28,6 +28,10 @@ export interface DashboardSummary {
   }>;
   staffWorkload: Array<{ id: string; name: string; role: string; activeCount: number }>;
   feedback: { averageRating: number | null; totalCount: number; negativeCount: number };
+  /** Requests per property-local day, oldest first. */
+  dailyVolume: Array<{ date: string; label: string; count: number }>;
+  /** Most-requested services over the timing window. */
+  topServices: Array<{ name: string; count: number }>;
   recentComplaints: Array<{
     id: string;
     rating: number;
@@ -43,7 +47,9 @@ export interface DashboardSummary {
  * comes from a plain, tenant-scoped Postgres query — no separate analytics
  * warehouse or event pipeline (section 24/42).
  */
-export async function getDashboardSummary(actor: StaffActor): Promise<DashboardSummary> {
+const TREND_DAYS = 7;
+
+export async function getDashboardSummary(actor: StaffActor, timeZone: string): Promise<DashboardSummary> {
   assertAuthorized({
     actor,
     action: "business:view_analytics",
@@ -51,10 +57,11 @@ export async function getDashboardSummary(actor: StaffActor): Promise<DashboardS
   });
 
   const now = new Date();
-  const todayStart = repo.startOfDay(now);
+  const todayStart = repo.startOfDay(now, timeZone);
+  const trendStart = new Date(todayStart.getTime() - (TREND_DAYS - 1) * 24 * 60 * 60 * 1000);
   const timingWindowStart = new Date(now.getTime() - TIMING_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
-  const [todayCounts, activeForOverdue, timingSamples, departments, staff, feedbackSummary, recentFeedback] =
+  const [todayCounts, activeForOverdue, timingSamples, departments, staff, feedbackSummary, recentFeedback, mix] =
     await Promise.all([
       repo.getStatusCounts(actor.businessId, todayStart),
       repo.getActiveRequestsForOverdueCheck(actor.businessId),
@@ -63,7 +70,28 @@ export async function getDashboardSummary(actor: StaffActor): Promise<DashboardS
       repo.getStaffWorkload(actor.businessId),
       getFeedbackSummaryForBusiness(actor.businessId),
       listFeedbackForBusiness(actor.businessId, { limit: 5, maxRating: 2 }),
+      repo.getRecentRequestMix(actor.businessId, timingWindowStart),
     ]);
+
+  const dayKey = (d: Date) => utcToZonedLocal(d, timeZone).slice(0, 10);
+  const perDay = new Map<string, number>();
+  const perService = new Map<string, number>();
+  for (const r of mix) {
+    if (r.createdAt >= trendStart) perDay.set(dayKey(r.createdAt), (perDay.get(dayKey(r.createdAt)) ?? 0) + 1);
+    const name = r.service?.name ?? "General request";
+    perService.set(name, (perService.get(name) ?? 0) + 1);
+  }
+  const dailyVolume = Array.from({ length: TREND_DAYS }, (_, i) => {
+    // Noon avoids DST edges when stepping whole days.
+    const day = new Date(trendStart.getTime() + i * 24 * 60 * 60 * 1000 + 12 * 60 * 60 * 1000);
+    const key = dayKey(day);
+    const label = new Intl.DateTimeFormat("en-GB", { weekday: "short", timeZone }).format(day);
+    return { date: key, label, count: perDay.get(key) ?? 0 };
+  });
+  const topServices = [...perService.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6);
 
   const overdueByDepartment = new Map<string, number>();
   let overdueCount = 0;
@@ -113,6 +141,8 @@ export async function getDashboardSummary(actor: StaffActor): Promise<DashboardS
     departmentPerformance,
     staffWorkload,
     feedback: feedbackSummary,
+    dailyVolume,
+    topServices,
     recentComplaints: recentFeedback.map((f: (typeof recentFeedback)[number]) => ({
       id: f.id,
       rating: f.rating,

@@ -528,56 +528,80 @@ business they don't already belong to (only fresh-signup owner creation
 and same-business staff invites exist; adding an *existing* user to a
 *second* business has no UI or service function yet).
 
-## Verification performed (current, after Milestone 4)
+## Milestone 6 — Production hardening and the full UI
 
-```bash
-npm run typecheck   # tsc --noEmit — clean
-npm run lint        # eslint — clean
-npm run test        # vitest run — 96/96 passing across 8 files
-npm run build       # next build — compiles & type-checks cleanly;
-                     # fails only at page-data collection on the
-                     # un-generated Prisma Client (see above)
-```
+(Milestone 5, running against real Postgres, is described above under
+"Resolved: Prisma CLI's native engine binaries…".)
 
-Prisma schema validation/generation could not be run here (see the network
-limitation above) and needs to happen as the first step of the next
-session/milestone — see the `db:generate`/`db:migrate` commands above. This
-remains true after Milestone 4: every module above is type-checked against
-the un-generated Prisma stub, not exercised against a real database. No
-schema changes were needed for Milestone 4 — every model this UI writes to
-(Department, Location, Service, BusinessMembership, AuditLog) already
-existed.
+### Security fixes
+- **Supabase public API locked down** (`20260925000000_lock_down_public_api`):
+  every table had been readable and writable through Supabase's REST API
+  with the public anon key. RLS on with no policies, API roles revoked.
+- **Guest request location is server-resolved.** The QR scan now stores
+  the scanned location on the guest session (`GuestSession.currentLocationId`,
+  migration `…_guest_session_current_location`); the portal only sends
+  `where = scanned | stay`, never a location id. Previously a hidden form
+  field and a `?location=` URL parameter decided it.
+- **Open redirect fixed** in `/login?next=` (`//evil.example` passed the old
+  `startsWith("/")` check). `lib/security/redirect.ts`, tested.
+- **No user-controlled text via URLs.** Error messages used to be passed
+  through `?error=` and rendered verbatim (text injection / phishing).
+  Management forms now use `ActionForm` + `runAction` (errors returned as
+  action state); remaining `?error=` params are fixed codes mapped to copy.
+- **Authorization bug:** the accept/start/complete row rules applied to
+  managers and owners too, so a manager without a department couldn't
+  accept any department-routed request. Now scoped to the STAFF role; an
+  assigned STAFF member can accept a request assigned to them. Tests added.
+- **Security headers + nonce CSP** (`next.config.ts`, `src/proxy.ts`).
+  Root layout reads `headers()` so every route renders dynamically.
+- **Rate limiting works across instances**: Upstash Redis REST backend when
+  configured, in-memory fallback. Password change is rate limited.
+- **Validation added** for: reserved/short workspace slugs, email format,
+  password max length (bounds scrypt work), business settings (strict
+  `#rrggbb` colors, https-only logo/cover URLs, lengths), timezone and
+  currency, location type/status, service icon/priority/time, staff role.
+- **Timezones:** checkout times typed at reception and the overview's
+  "today" were interpreted in the SERVER's timezone. `lib/format.ts`
+  `zonedLocalToUtc`/`utcToZonedLocal`, tested including DST.
+- Audit entries now record IP and user agent.
+
+### Features
+- Design system (`src/components/ui`), staff app shell with role-filtered
+  navigation derived from the permission matrix, mobile drawer.
+- Requests board (New / Accepted / In progress columns, urgency order,
+  late-by badges, assign-to for managers, history view).
+- In-app notifications: `/api/b/{slug}/pulse` polled every 15 s by
+  `RequestPulse` (toast, chime, badge, tab title, board refresh). No queue
+  infrastructure needed for this first channel; email/push remain V2.
+- Guest portal: tenant-branded, service tiles with icons, request page with
+  location choice, live request progress, guest cancellation, feedback
+  with categories, sign-out on this device.
+- Per-service due times (`dueAt` from `estimatedMinutes`) so "overdue" is
+  real per service.
+- Bulk location ranges (Room 101–150), bulk QR creation with a printable
+  sheet, check-in shows a scannable activation QR, staff re-enable,
+  password change page, settings with live portal preview, audit log with
+  readable descriptions, filters and paging, overview with 7-day volume
+  and most-requested services.
+
+### Verification
+`tsc`, ESLint and `next build` clean; 145 unit tests. A Playwright
+end-to-end run against local Postgres passes 31 checks: activation → QR
+scan → request → staff accept/start/complete → guest sees done → feedback
+→ complaint on overview → checkout ends access, plus probes for a
+photographed QR without a stay, invalid tokens, anonymous and cross-tenant
+access to the board and pulse API, reserved slugs and STAFF role limits.
+Production mode verified with the strict CSP (no console violations).
 
 ## Next milestone (proposed)
 
-1. Run `db:generate` + first `db:migrate` in an unrestricted environment;
-   fix any schema errors the compiler surfaces; run `npm run db:seed` and
-   confirm the Ocean Pearl Resort tenant, then walk the **entire** flow
-   through the UI (not the seed script) end to end: sign up a new business
-   → configure settings → create a department → create a location → create
-   a service linked to that department → generate a QR for the location →
-   invite a staff member and sign in as them → check in a guest → open the
-   activation link → scan the QR → submit a request → accept/start/
-   complete it as staff → leave feedback → check the manager dashboard and
-   audit log reflect it → check out the guest.
-2. Once real Prisma types exist, tighten `PrismaTransactionClient` in
-   `src/lib/prisma.ts` from `any` to the derived type noted in its TODO
-   comment, and re-typecheck everything that uses it.
-3. Notifications (async, queued — section 21). This is now the largest
-   remaining V1-MVP gap: real events exist to notify about (request
-   created/assigned/completed, negative feedback, staff invited), and
-   `inviteStaffMember`'s temporary-password reveal is the last "shown once
-   in the UI instead of emailed" workaround standing in for it.
-4. A UI/flow for adding an *existing* user to a *second* business (today
-   `signUpBusiness` only creates brand-new owners, and `inviteStaffMember`
-   refuses if the email already has an account anywhere).
-5. Redis-backed rate limiting before any multi-instance/multi-region
-   deployment — `src/lib/rate-limit.ts`'s own comment documents exactly
-   what needs to change and why the current in-process version is wrong
-   for that scenario specifically (not for a single instance).
-6. Per-service `dueAt` population at request-creation time, using
-   `Service.estimatedMinutes`, so "overdue" in the manager dashboard
-   reflects real per-service SLAs instead of the flat 60-minute fallback
-   in `modules/analytics/metrics.ts`.
-7. `Task` decomposition (section 10) — still correctly deferred; no
-   feature has needed it yet.
+1. Internationalization (English, Sinhala, Tamil). User-facing strings are
+   still inline; this is the largest remaining gap against the project
+   instructions (section 39).
+2. Email notifications through a queue (section 21) — the in-app channel
+   exists; staff invites and guest links still rely on copy/QR hand-off.
+3. Adding an existing user to a second business.
+4. File uploads (request photos) via object storage.
+5. Integration tests against a real database in CI, and running the
+   Playwright flow in CI.
+6. `Task` decomposition — still correctly deferred.

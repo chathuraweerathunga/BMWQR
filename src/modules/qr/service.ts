@@ -1,7 +1,8 @@
 import QRCode from "qrcode";
 import { assertAuthorized } from "@/modules/auth/authorize";
 import type { StaffActor } from "@/modules/auth/types";
-import { NotFoundError } from "@/lib/errors";
+import { NotFoundError, ValidationError } from "@/lib/errors";
+import { getLocationById, listLocationsForBusiness } from "@/modules/locations/repository";
 import { env } from "@/lib/env";
 import { logAudit } from "@/modules/audit/service";
 import { buildQrUrl } from "./qr-token";
@@ -26,6 +27,9 @@ export async function createQr(
   input: { locationId: string; label?: string | null },
 ) {
   assertAuthorized({ actor, action: "qr:manage", resource: { businessId: actor.businessId } });
+  const location = await getLocationById(actor.businessId, input.locationId);
+  if (!location) throw new NotFoundError("Location");
+  if (input.label && input.label.length > 60) throw new ValidationError("Keep the label under 60 characters.");
   const { qrCode, token } = await repo.createQrCode({
     businessId: actor.businessId,
     locationId: input.locationId,
@@ -66,4 +70,53 @@ export async function setQrStatus(
     newValue: { status },
   });
   return result;
+}
+
+const MAX_BATCH = 300;
+
+/** Structural locations guests are never "at": no QR code by default. */
+export const NO_QR_BY_DEFAULT: ReadonlySet<string> = new Set(["BUILDING", "FLOOR"]);
+
+/**
+ * Creates one QR code for every ACTIVE location of the given types that
+ * doesn't already have an active code: "give every room its QR" in one
+ * step. Returns each code's image and link for printing right away; the
+ * raw tokens are never stored, so this is the only moment they exist.
+ */
+export async function createQrForUncoveredLocations(
+  actor: StaffActor,
+  input: { types?: string[] } = {},
+) {
+  assertAuthorized({ actor, action: "qr:manage", resource: { businessId: actor.businessId } });
+
+  const [locations, existing] = await Promise.all([
+    listLocationsForBusiness(actor.businessId),
+    repo.listQrCodesForBusiness(actor.businessId),
+  ]);
+  const covered = new Set(
+    existing.filter((q: { status: string }) => q.status === "ACTIVE").map((q: { locationId: string }) => q.locationId),
+  );
+  const targets = locations
+    .filter((l: { status: string; type: string; id: string }) =>
+      l.status === "ACTIVE" &&
+      !covered.has(l.id) &&
+      (input.types?.length ? input.types.includes(l.type) : !NO_QR_BY_DEFAULT.has(l.type)),
+    )
+    .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+    .slice(0, MAX_BATCH);
+
+  const codes: Array<{ locationName: string; url: string; imageDataUrl: string }> = [];
+  for (const location of targets) {
+    const { token } = await repo.createQrCode({ businessId: actor.businessId, locationId: location.id });
+    codes.push({ locationName: location.name, ...(await toDisplayable(token)) });
+  }
+
+  if (codes.length) {
+    await logAudit(actor, {
+      action: "qr.bulk_created",
+      entityType: "QRCode",
+      newValue: { count: codes.length, types: input.types ?? null },
+    });
+  }
+  return codes;
 }

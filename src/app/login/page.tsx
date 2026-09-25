@@ -1,13 +1,20 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import type { Metadata } from "next";
 import { AuthError } from "next-auth";
 import { signIn } from "@/auth";
+import { AuthLayout } from "@/components/app/AuthLayout";
+import { Alert } from "@/components/ui/Alert";
+import { Field, Input } from "@/components/ui/Form";
+import { SubmitButton } from "@/components/ui/SubmitButton";
+import { safeRedirectPath } from "@/lib/security/redirect";
+
+export const metadata: Metadata = { title: "Sign in" };
 
 /**
- * Minimal staff sign-in page — deliberately unstyled beyond basic Tailwind
- * spacing. The real staff UI (branding, layout, dashboard shell) is a
- * later milestone; this exists now so the auth flow is end-to-end
- * testable once a database is available.
+ * Staff sign-in. Wrong email and wrong password get the same message, and
+ * a rate-limited attempt looks identical too, so the form reveals nothing
+ * about which accounts exist.
  */
 export default async function LoginPage({
   searchParams,
@@ -15,9 +22,7 @@ export default async function LoginPage({
   searchParams: Promise<{ error?: string; next?: string }>;
 }) {
   const { error, next } = await searchParams;
-  // Only ever a same-site relative path — never an absolute/external URL —
-  // so a crafted `next` value can't turn this into an open redirect.
-  const redirectTo = next && next.startsWith("/") ? next : "/";
+  const redirectTo = safeRedirectPath(next);
 
   async function login(formData: FormData) {
     "use server";
@@ -29,50 +34,52 @@ export default async function LoginPage({
       });
     } catch (err) {
       if (err instanceof AuthError) {
-        redirect(`/login?error=${err.type}${next ? `&next=${encodeURIComponent(next)}` : ""}`);
+        const nextParam = redirectTo !== "/" ? `&next=${encodeURIComponent(redirectTo)}` : "";
+        redirect(`/login?error=credentials${nextParam}`);
       }
       throw err;
     }
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-4 p-6">
-      <h1 className="text-xl font-semibold">Staff sign in</h1>
+    <AuthLayout>
+      <h1 className="text-[28px] font-extrabold tracking-tight">Sign in</h1>
+      <p className="mt-1.5 text-[15px] text-ink-soft">For your team: front desk, housekeeping, managers.</p>
+
       {error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
-          Incorrect email or password.
-        </p>
+        <Alert tone="error" className="mt-6">
+          That email and password don&apos;t match an account. Check both and try again.
+        </Alert>
       )}
-      <form action={login} className="flex flex-col gap-3">
-        <input
-          name="email"
-          type="email"
-          placeholder="Email"
-          required
-          autoComplete="email"
-          className="rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <input
-          name="password"
-          type="password"
-          placeholder="Password"
-          required
-          autoComplete="current-password"
-          className="rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <button
-          type="submit"
-          className="rounded bg-black px-3 py-2 text-sm font-medium text-white"
-        >
+
+      <form action={login} className="mt-8 flex flex-col gap-5">
+        <Field label="Work email" htmlFor="email">
+          <Input id="email" name="email" type="email" required autoComplete="email" autoFocus maxLength={254} />
+        </Field>
+        <Field label="Password" htmlFor="password">
+          <Input
+            id="password"
+            name="password"
+            type="password"
+            required
+            autoComplete="current-password"
+            maxLength={200}
+          />
+        </Field>
+        <SubmitButton size="lg" block pendingLabel="Signing in">
           Sign in
-        </button>
+        </SubmitButton>
       </form>
-      <p className="text-center text-sm text-gray-500">
-        New business?{" "}
-        <Link href="/signup" className="underline">
+
+      <p className="mt-8 text-sm text-ink-soft">
+        Setting up a new property?{" "}
+        <Link href="/signup" className="font-semibold text-lagoon-700 underline-offset-4 hover:underline">
           Create a workspace
         </Link>
       </p>
-    </main>
+      <p className="mt-3 text-sm text-ink-faint">
+        Guests don&apos;t need an account. Reception gives you a link at check-in.
+      </p>
+    </AuthLayout>
   );
 }

@@ -44,6 +44,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const password =
           typeof credentials?.password === "string" ? credentials.password : undefined;
         if (!email || !password) return null;
+        // Bound scrypt work per attempt (see business/service.ts).
+        if (password.length > 200 || email.length > 254) return null;
 
         // Rate-limited by IP+email together: an IP-only key would let one
         // attacker's lockout collide with unrelated guests behind the same
@@ -51,7 +53,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // brute-force one account — both dimensions matter here (project
         // instructions section 32).
         const ip = getClientIp(request.headers);
-        const limitResult = rateLimit(
+        const limitResult = await rateLimit(
           `login:${ip}:${email.toLowerCase()}`,
           LOGIN_ATTEMPT_LIMIT,
           LOGIN_ATTEMPT_WINDOW_MS,

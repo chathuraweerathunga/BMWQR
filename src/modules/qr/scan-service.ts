@@ -1,5 +1,9 @@
 import { getActiveStayById } from "@/modules/guest-stays/repository";
-import { findSessionByToken, touchLastSeen } from "@/modules/guest-sessions/repository";
+import {
+  findSessionByToken,
+  setCurrentLocation,
+  touchLastSeen,
+} from "@/modules/guest-sessions/repository";
 import { findQrCodeByToken, recordScan } from "./repository";
 import { resolveQrScan } from "./qr-token";
 import type { QrScanResult } from "./types";
@@ -65,7 +69,17 @@ export async function scanQr({
     now,
   });
 
+  // A QR code on a location that staff have taken out of service (e.g. a
+  // room under maintenance) shouldn't route new requests there. Reported
+  // the same way as a disabled QR code: the guest sees "ask staff".
+  if (result.ok && qrCodeRow && qrCodeRow.location.status !== "ACTIVE") {
+    return { ok: false, reason: "QR_DISABLED" };
+  }
+
   if (result.ok && qrCodeRow) {
+    // Awaited, unlike the bookkeeping below: the guest's next request is
+    // routed from this value, so it must be written before we redirect.
+    await setCurrentLocation(qrCodeRow.businessId, result.guestSessionId, qrCodeRow.locationId);
     // Fire-and-forget bookkeeping — never let an analytics update block or
     // fail the guest's actual access decision.
     void recordScan(qrCodeRow.id).catch(() => undefined);

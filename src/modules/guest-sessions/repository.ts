@@ -59,3 +59,25 @@ export async function revokeSession(businessId: string, sessionId: string, now: 
     data: { revokedAt: now },
   });
 }
+
+/**
+ * Records where a guest just scanned a QR code. Called only by the
+ * server-side QR scan flow after the scan passed every check, so the
+ * location a guest's request is routed to is always one the server
+ * resolved itself (project instructions section 20), never a client value.
+ * Tenant-scoped: the composite FK also rejects a cross-tenant location.
+ */
+export async function setCurrentLocation(businessId: string, sessionId: string, locationId: string) {
+  return prisma.guestSession.updateMany({
+    where: { id: sessionId, businessId, revokedAt: null },
+    data: { currentLocationId: locationId },
+  });
+}
+
+/** Tenant-scoped session lookup including the server-recorded scan location. */
+export async function getSessionWithLocation(businessId: string, sessionId: string) {
+  return prisma.guestSession.findFirst({
+    where: { id: sessionId, businessId },
+    include: { currentLocation: { select: { id: true, name: true, status: true } } },
+  });
+}

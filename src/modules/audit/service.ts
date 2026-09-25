@@ -2,6 +2,20 @@ import { assertAuthorized } from "@/modules/auth/authorize";
 import type { Actor, StaffActor } from "@/modules/auth/types";
 import { listAuditLogForBusiness, recordAuditEntry } from "./repository";
 import type { AuditActorType } from "./types";
+import { headers } from "next/headers";
+import { getClientIp } from "@/lib/rate-limit";
+
+/** IP and browser of the request being audited, when there is one (a
+ * server action or route handler). Background jobs have no request. */
+async function requestMetadata(): Promise<{ ipAddress: string | null; userAgent: string | null }> {
+  try {
+    const h = await headers();
+    const ip = getClientIp(h);
+    return { ipAddress: ip === "unknown" ? null : ip.slice(0, 64), userAgent: h.get("user-agent")?.slice(0, 300) ?? null };
+  } catch {
+    return { ipAddress: null, userAgent: null };
+  }
+}
 
 export interface LogAuditParams {
   /** Defaults to `actor`'s own businessId when the actor carries one
@@ -50,7 +64,9 @@ function businessIdFor(actor: Actor): string | null {
  */
 export async function logAudit(actor: Actor, params: LogAuditParams): Promise<void> {
   try {
+    const meta = await requestMetadata();
     await recordAuditEntry({
+      ...meta,
       businessId: params.businessId !== undefined ? params.businessId : businessIdFor(actor),
       actorType: actorTypeFor(actor),
       actorUserId: actorUserIdFor(actor),
@@ -73,7 +89,10 @@ export async function logAudit(actor: Actor, params: LogAuditParams): Promise<vo
 /** Staff-facing audit-log listing (`business:view_audit_log` — the
  * permission has existed in the matrix since Milestone 1; this is its
  * first caller). BUSINESS_OWNER or MANAGER only. */
-export async function getAuditLogForBusiness(actor: StaffActor, params: { limit?: number } = {}) {
+export async function getAuditLogForBusiness(
+  actor: StaffActor,
+  params: { limit?: number; before?: Date; actionPrefix?: string } = {},
+) {
   assertAuthorized({
     actor,
     action: "business:view_audit_log",

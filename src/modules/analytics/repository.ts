@@ -1,11 +1,13 @@
 import { prisma } from "@/lib/prisma";
+import { utcToZonedLocal, zonedLocalToUtc } from "@/lib/format";
 
 const ACTIVE_STATUSES = ["NEW", "ACCEPTED", "IN_PROGRESS"] as const;
 
-export function startOfDay(now: Date): Date {
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return d;
+/** Midnight at the PROPERTY, as a UTC instant. Using the server's own
+ * midnight would shift "today" by the property's UTC offset. */
+export function startOfDay(now: Date, timeZone: string): Date {
+  const localDate = utcToZonedLocal(now, timeZone).slice(0, 10);
+  return zonedLocalToUtc(`${localDate}T00:00`, timeZone) ?? now;
 }
 
 export async function getStatusCounts(businessId: string, since?: Date) {
@@ -64,5 +66,15 @@ export async function getStaffWorkload(businessId: string) {
         select: { id: true },
       },
     },
+  });
+}
+
+/** Created-at stamps and service names since `since`, for the daily volume
+ * trend and the most-requested services. Bucketing by day happens in the
+ * service layer, in the property's timezone. */
+export async function getRecentRequestMix(businessId: string, since: Date) {
+  return prisma.request.findMany({
+    where: { businessId, createdAt: { gte: since } },
+    select: { createdAt: true, service: { select: { name: true } } },
   });
 }

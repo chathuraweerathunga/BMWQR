@@ -1,183 +1,249 @@
 import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import type { Metadata } from "next";
+import { ConciergeBell } from "lucide-react";
 import { getStaffContext } from "@/lib/staff-context";
+import { permissionsForActor } from "@/modules/auth/permissions";
 import { listAllServicesForBusiness } from "@/modules/services/repository";
-import { createService, setServiceActive } from "@/modules/services/service";
+import { createService, setServiceActive, updateService } from "@/modules/services/service";
 import { listDepartmentsForBusiness } from "@/modules/departments/repository";
-import { AuthorizationError } from "@/modules/auth/types";
-import { NotFoundError, ValidationError } from "@/lib/errors";
+import { SERVICE_ICON_KEYS } from "@/modules/services/icons";
+import { runAction, textField } from "@/lib/actions";
+import { ActionForm, type ActionResult } from "@/components/ui/ActionForm";
+import { EmptyState, PageHeader, Panel, PanelHeader } from "@/components/ui/Layout";
+import { Field, Input, Select } from "@/components/ui/Form";
+import { SubmitButton } from "@/components/ui/SubmitButton";
+import { PriorityMark } from "@/components/ui/Status";
+import { SERVICE_ICONS, ServiceIcon, serviceIconKey } from "@/components/guest/ServiceIcon";
+import { cn } from "@/lib/cn";
 
-const PRIORITIES = ["LOW", "NORMAL", "HIGH", "URGENT"] as const;
+export const metadata: Metadata = { title: "Services" };
 
-export default async function ServicesPage({
-  params,
-  searchParams,
+type Priority = "LOW" | "NORMAL" | "HIGH" | "URGENT";
+const PRIORITY_OPTIONS: Array<{ value: Priority; label: string }> = [
+  { value: "LOW", label: "Low" },
+  { value: "NORMAL", label: "Normal" },
+  { value: "HIGH", label: "High" },
+  { value: "URGENT", label: "Urgent" },
+];
+
+interface ServiceRow {
+  id: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  departmentId: string | null;
+  defaultPriority: string;
+  estimatedMinutes: number | null;
+  isActive: boolean;
+  department: { name: string } | null;
+}
+
+function readServiceForm(formData: FormData) {
+  const minutes = textField(formData, "estimatedMinutes");
+  return {
+    name: textField(formData, "name") ?? "",
+    description: textField(formData, "description"),
+    icon: textField(formData, "icon"),
+    departmentId: textField(formData, "departmentId"),
+    defaultPriority: (textField(formData, "defaultPriority") ?? "NORMAL") as Priority,
+    estimatedMinutes: minutes ? Number(minutes) : null,
+  };
+}
+
+function ServiceFields({
+  idPrefix,
+  departments,
+  service,
 }: {
-  params: Promise<{ businessSlug: string }>;
-  searchParams: Promise<{ error?: string }>;
+  idPrefix: string;
+  departments: Array<{ id: string; name: string }>;
+  service?: ServiceRow;
 }) {
-  const { businessSlug } = await params;
-  const { error } = await searchParams;
-  const { business, actor } = await getStaffContext(businessSlug);
-
-  // Route-level guard mirroring the other management pages: the layout
-  // only hides the nav link for STAFF. `createService`/`setServiceActive`
-  // re-check `service:manage` regardless.
-  if (actor.role !== "BUSINESS_OWNER" && actor.role !== "MANAGER") {
-    redirect(`/${businessSlug}/dashboard`);
-  }
-
-  const [services, departments] = await Promise.all([
-    listAllServicesForBusiness(business.id),
-    listDepartmentsForBusiness(business.id),
-  ]);
-
-  async function createAction(formData: FormData) {
-    "use server";
-    const name = formData.get("name");
-    const departmentId = formData.get("departmentId");
-    const defaultPriority = formData.get("defaultPriority");
-    const estimatedMinutes = formData.get("estimatedMinutes");
-    const description = formData.get("description");
-
-    if (typeof name !== "string" || !name.trim()) {
-      redirect(`/${businessSlug}/services?error=${encodeURIComponent("Service name is required.")}`);
-    }
-
-    try {
-      await createService(actor, {
-        name: name as string,
-        departmentId: typeof departmentId === "string" && departmentId ? departmentId : null,
-        defaultPriority:
-          typeof defaultPriority === "string" && defaultPriority
-            ? (defaultPriority as (typeof PRIORITIES)[number])
-            : undefined,
-        estimatedMinutes:
-          typeof estimatedMinutes === "string" && estimatedMinutes
-            ? Number(estimatedMinutes)
-            : null,
-        description: typeof description === "string" && description.trim() ? description : null,
-      });
-    } catch (err) {
-      const message =
-        err instanceof AuthorizationError
-          ? "You don't have permission to manage services."
-          : err instanceof ValidationError || err instanceof NotFoundError
-            ? err.message
-            : "Something went wrong — please try again.";
-      redirect(`/${businessSlug}/services?error=${encodeURIComponent(message)}`);
-    }
-    redirect(`/${businessSlug}/services`);
-  }
-
-  async function toggleActiveAction(formData: FormData) {
-    "use server";
-    const serviceId = formData.get("serviceId");
-    const isActive = formData.get("isActive") === "true";
-    if (typeof serviceId !== "string") return;
-
-    try {
-      await setServiceActive(actor, serviceId, isActive);
-    } catch (err) {
-      const message =
-        err instanceof AuthorizationError ? "NOT_ALLOWED" : err instanceof NotFoundError ? "NOT_FOUND" : "UNKNOWN";
-      redirect(`/${businessSlug}/services?error=${message}`);
-    }
-    redirect(`/${businessSlug}/services`);
-  }
-
+  const icon = service ? serviceIconKey(service.icon, service.name) : "general";
   return (
-    <div className="flex max-w-2xl flex-col gap-4">
-      <h1 className="text-lg font-semibold">Services</h1>
-
-      {error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{decodeURIComponent(error)}</p>
-      )}
-
-      {departments.length === 0 && (
-        <p className="rounded bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          Create a department first if you want this service to route to one — services can also
-          be created without a department for now.
-        </p>
-      )}
-
-      <form action={createAction} className="flex flex-col gap-2 rounded border border-gray-200 p-4">
-        <h2 className="text-sm font-semibold">New service</h2>
-        <div className="flex flex-wrap gap-2">
-          <input
-            name="name"
-            placeholder="e.g. Extra towels"
-            required
-            className="rounded border border-gray-300 px-3 py-2 text-sm"
-          />
-          <select name="departmentId" className="rounded border border-gray-300 px-3 py-2 text-sm">
-            <option value="">No department</option>
-            {departments.map((dept: (typeof departments)[number]) => (
-              <option key={dept.id} value={dept.id}>
-                {dept.name}
+    <>
+      <Field label="Name" htmlFor={`${idPrefix}-name`}>
+        <Input id={`${idPrefix}-name`} name="name" required maxLength={80} defaultValue={service?.name} placeholder="Extra towels" />
+      </Field>
+      <Field label="Short description" htmlFor={`${idPrefix}-desc`} optional hint="Shown to guests under the name.">
+        <Input id={`${idPrefix}-desc`} name="description" maxLength={300} defaultValue={service?.description ?? ""} />
+      </Field>
+      <fieldset>
+        <legend className="text-sm font-semibold">Icon</legend>
+        <div className="mt-2 grid grid-cols-6 gap-1.5">
+          {SERVICE_ICON_KEYS.map((key) => {
+            const { icon: Icon, label } = SERVICE_ICONS[key];
+            return (
+              <label
+                key={key}
+                title={label}
+                className="grid aspect-square cursor-pointer place-items-center rounded-[var(--radius-control)] border border-line text-ink-soft hover:border-ink-faint has-[:checked]:border-lagoon-600 has-[:checked]:bg-lagoon-50 has-[:checked]:text-lagoon-700 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-brass-500"
+              >
+                <input type="radio" name="icon" value={key} defaultChecked={key === icon} className="sr-only" />
+                <Icon className="size-5" aria-hidden />
+                <span className="sr-only">{label}</span>
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
+      <Field label="Handled by" htmlFor={`${idPrefix}-dept`}>
+        <Select id={`${idPrefix}-dept`} name="departmentId" defaultValue={service?.departmentId ?? ""}>
+          <option value="">No department (front desk decides)</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Priority" htmlFor={`${idPrefix}-prio`}>
+          <Select id={`${idPrefix}-prio`} name="defaultPriority" defaultValue={service?.defaultPriority ?? "NORMAL"}>
+            {PRIORITY_OPTIONS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
               </option>
             ))}
-          </select>
-          <select name="defaultPriority" className="rounded border border-gray-300 px-3 py-2 text-sm">
-            {PRIORITIES.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-          <input
+          </Select>
+        </Field>
+        <Field label="Expected time" htmlFor={`${idPrefix}-min`} optional hint="Minutes. Late after this.">
+          <Input
+            id={`${idPrefix}-min`}
             name="estimatedMinutes"
             type="number"
+            inputMode="numeric"
             min={1}
-            placeholder="Est. minutes"
-            className="w-32 rounded border border-gray-300 px-3 py-2 text-sm"
+            max={1440}
+            defaultValue={service?.estimatedMinutes ?? ""}
+            placeholder="15"
           />
-        </div>
-        <input
-          name="description"
-          placeholder="Description (optional)"
-          className="rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <button
-          type="submit"
-          className="self-start rounded bg-black px-3 py-1.5 text-xs font-medium text-white"
-        >
-          Add service
-        </button>
-      </form>
+        </Field>
+      </div>
+    </>
+  );
+}
 
-      <ul className="flex flex-col gap-2">
-        {services.length === 0 && <p className="text-sm text-gray-500">No services yet.</p>}
-        {services.map((service: (typeof services)[number]) => (
-          <li
-            key={service.id}
-            className="flex items-center justify-between rounded border border-gray-200 px-4 py-3"
-          >
-            <div>
-              <p className="text-sm font-medium">
-                {service.name}
-                <span
-                  className={`ml-2 rounded px-2 py-0.5 text-xs ${
-                    service.isActive ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {service.isActive ? "ACTIVE" : "INACTIVE"}
-                </span>
-              </p>
-              <p className="text-xs text-gray-500">
-                {service.department?.name ?? "No department"} · {service.defaultPriority}
-                {service.estimatedMinutes ? ` · ~${service.estimatedMinutes} min` : ""}
-              </p>
+export default async function ServicesPage({ params }: { params: Promise<{ businessSlug: string }> }) {
+  const { businessSlug } = await params;
+  const { business, actor } = await getStaffContext(businessSlug);
+  if (!permissionsForActor(actor).has("service:manage")) redirect(`/${businessSlug}/dashboard`);
+
+  const [services, departments] = await Promise.all([
+    listAllServicesForBusiness(business.id) as Promise<ServiceRow[]>,
+    listDepartmentsForBusiness(business.id),
+  ]);
+  const deptOptions = departments.map((d: { id: string; name: string }) => ({ id: d.id, name: d.name }));
+  const path = `/${businessSlug}/services`;
+
+  async function create(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
+    "use server";
+    const result = await runAction("services.create", async () => {
+      const s = await createService(actor, readServiceForm(formData));
+      return `Added ${s.name}. Guests can request it now.`;
+    });
+    revalidatePath(path);
+    return result;
+  }
+
+  async function update(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
+    "use server";
+    const id = textField(formData, "serviceId");
+    const result = await runAction("services.update", async () => {
+      if (!id) return;
+      await updateService(actor, id, readServiceForm(formData));
+      return "Saved.";
+    });
+    revalidatePath(path);
+    return result;
+  }
+
+  async function toggle(formData: FormData) {
+    "use server";
+    const id = textField(formData, "serviceId");
+    if (!id) return;
+    await runAction("services.toggle", async () => {
+      await setServiceActive(actor, id, formData.get("isActive") === "true");
+    });
+    revalidatePath(path);
+  }
+
+  const activeCount = services.filter((s) => s.isActive).length;
+
+  return (
+    <>
+      <PageHeader
+        title="Services"
+        description="What guests can ask for from their phone. Each service goes to a department, with an expected time."
+      />
+
+      <div className="grid items-start gap-6 lg:grid-cols-[380px_1fr]">
+        <Panel>
+          <PanelHeader title="Add a service" />
+          <ActionForm action={create} className="flex flex-col gap-4 p-5">
+            <ServiceFields idPrefix="new" departments={deptOptions} />
+            <SubmitButton pendingLabel="Adding">Add service</SubmitButton>
+          </ActionForm>
+        </Panel>
+
+        <Panel className="overflow-hidden">
+          <PanelHeader title="Your services" description={`${activeCount} shown to guests, ${services.length - activeCount} hidden`} />
+          {services.length === 0 ? (
+            <div className="p-5">
+              <EmptyState icon={<ConciergeBell className="size-6" />} title="No services yet">
+                Add what guests ask for most: towels, housekeeping, room service, maintenance.
+              </EmptyState>
             </div>
-            <form action={toggleActiveAction}>
-              <input type="hidden" name="serviceId" value={service.id} />
-              <input type="hidden" name="isActive" value={(!service.isActive).toString()} />
-              <button type="submit" className="rounded border border-gray-300 px-3 py-1 text-xs font-medium">
-                {service.isActive ? "Deactivate" : "Activate"}
-              </button>
-            </form>
-          </li>
-        ))}
-      </ul>
-    </div>
+          ) : (
+            <ul className="divide-y divide-line">
+              {services.map((s) => (
+                <li key={s.id} className={cn("px-5 py-4", !s.isActive && "bg-paper")}>
+                  <details className="group">
+                    <summary className="flex cursor-pointer list-none items-center gap-3 [&::-webkit-details-marker]:hidden">
+                      <span
+                        className={cn(
+                          "grid size-10 shrink-0 place-items-center rounded-full",
+                          s.isActive ? "bg-lagoon-50 text-lagoon-700" : "bg-sunken text-ink-faint",
+                        )}
+                      >
+                        <ServiceIcon icon={s.icon} name={s.name} className="size-5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className={cn("font-bold", !s.isActive && "text-ink-faint")}>
+                          {s.name}
+                          {!s.isActive && <span className="ml-2 text-xs font-semibold">Hidden from guests</span>}
+                        </p>
+                        <p className="text-sm text-ink-faint">
+                          {s.department?.name ?? "No department"}
+                          {s.estimatedMinutes ? `, expected in ${s.estimatedMinutes} min` : ""}
+                        </p>
+                      </div>
+                      <PriorityMark priority={s.defaultPriority} />
+                      <span className="text-sm font-semibold text-lagoon-700 group-open:hidden">Edit</span>
+                      <span className="hidden text-sm font-semibold text-ink-faint group-open:inline">Close</span>
+                    </summary>
+                    <div className="mt-4 grid gap-4 rounded-[var(--radius-panel)] border border-line bg-surface p-4">
+                      <ActionForm action={update} resetOnSuccess={false} className="flex flex-col gap-4">
+                        <input type="hidden" name="serviceId" value={s.id} />
+                        <ServiceFields idPrefix={s.id} departments={deptOptions} service={s} />
+                        <SubmitButton pendingLabel="Saving">Save changes</SubmitButton>
+                      </ActionForm>
+                      <form action={toggle} className="border-t border-line pt-4">
+                        <input type="hidden" name="serviceId" value={s.id} />
+                        <input type="hidden" name="isActive" value={s.isActive ? "false" : "true"} />
+                        <SubmitButton variant={s.isActive ? "danger" : "secondary"} size="sm" pendingLabel="Saving">
+                          {s.isActive ? "Hide from guests" : "Show to guests"}
+                        </SubmitButton>
+                      </form>
+                    </div>
+                  </details>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+      </div>
+    </>
   );
 }

@@ -21,6 +21,7 @@ export const GUEST_ERROR_MESSAGES: Record<string, string> = {
   GUEST_STAY_EXPIRED: "Your stay has ended — thank you for visiting!",
   TENANT_MISMATCH: "That link doesn't match your session. Please contact reception.",
   RATE_LIMITED: "Too many attempts — please wait a moment and try again.",
+  SIGNED_OUT: "You've signed out on this device. Use the link from reception to sign back in.",
 };
 
 const INVALID_REASON_TO_ERROR_CODE: Record<GuestSessionInvalidReason, string> = {

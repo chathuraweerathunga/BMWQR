@@ -1,8 +1,8 @@
-/** Shared between the invite server action and the client component that
- * calls it via useActionState. */
+/** Shared between the invite server action and the client form. */
 export interface InviteRevealState {
   name: string;
   email: string;
   temporaryPassword: string;
   error?: string;
+  nonce?: number;
 }

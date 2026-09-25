@@ -1,99 +1,97 @@
 "use client";
 
-import { useActionState } from "react";
+/* eslint-disable @next/next/no-img-element -- a data: URL QR image */
+import { useActionState, useState } from "react";
+import { UserPlus } from "lucide-react";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { CopyButton } from "@/components/ui/CopyButton";
+import { Field, Input, Select } from "@/components/ui/Form";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 import type { CheckInRevealState } from "./types";
 
 type Location = { id: string; name: string };
 
-function defaultCheckOut(): string {
-  // Sensible default: tomorrow at 11:00 (a common hotel checkout time), in
-  // the shape <input type="datetime-local"> expects. Staff can change it.
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  d.setHours(11, 0, 0, 0);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
+/**
+ * Reception's check-in form. On success the guest's private link is shown
+ * ONCE, as a QR code to scan from the desk and as a link to copy. It is
+ * never stored in plain text or put in a URL, so it can't be shown again.
+ */
 export function CheckInForm({
   action,
   locations,
+  defaultCheckOut,
+  timezoneLabel,
 }: {
-  action: (
-    prevState: CheckInRevealState | null,
-    formData: FormData,
-  ) => Promise<CheckInRevealState | null>;
+  action: (prev: CheckInRevealState | null, formData: FormData) => Promise<CheckInRevealState | null>;
   locations: Location[];
+  defaultCheckOut: string;
+  timezoneLabel: string;
 }) {
-  const [state, formAction, pending] = useActionState(action, null);
+  const [state, formAction] = useActionState(action, null);
+  const [dismissedNonce, setDismissedNonce] = useState<number | undefined>(undefined);
+  const showReveal = state && !state.error && state.activationUrl && state.nonce !== dismissedNonce;
+
+  if (showReveal) {
+    return (
+      <div className="animate-ticket-in flex flex-col items-center gap-4 text-center">
+        <p className="text-sm font-semibold text-st-done">Checked in</p>
+        <h3 className="-mt-2 text-xl font-extrabold">{state.guestName}</h3>
+        <p className="max-w-xs text-sm text-ink-soft">
+          Ask the guest to scan this with their phone camera. It opens guest services for their stay.
+        </p>
+        {state.activationQr && (
+          <img
+            src={state.activationQr}
+            alt={`Guest services QR code for ${state.guestName}`}
+            className="size-56 rounded-[var(--radius-panel)] border border-line bg-white p-2"
+          />
+        )}
+        <div className="w-full rounded-[var(--radius-control)] bg-sunken px-3 py-2 text-left text-xs break-all text-ink-soft">
+          {state.activationUrl}
+        </div>
+        <div className="flex flex-wrap justify-center gap-2">
+          <CopyButton value={state.activationUrl} />
+          <Button size="sm" onClick={() => setDismissedNonce(state.nonce)}>
+            <UserPlus className="size-4" aria-hidden />
+            Next guest
+          </Button>
+        </div>
+        <p className="text-xs text-ink-faint">This link is shown once. Share it only with the guest.</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex flex-col gap-3 rounded border border-gray-200 p-4">
-      <h2 className="text-sm font-semibold">Check in a guest</h2>
-      <form action={formAction} className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1 text-xs">
-          Guest name
-          <input
-            name="guestFullName"
-            required
-            className="rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Email (optional)
-          <input
-            type="email"
-            name="guestEmail"
-            className="rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Phone (optional)
-          <input name="guestPhone" className="rounded border border-gray-300 px-2 py-1 text-sm" />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Room / location
-          <select name="locationId" className="rounded border border-gray-300 px-2 py-1 text-sm">
-            <option value="">— none —</option>
-            {locations.map((loc) => (
-              <option key={loc.id} value={loc.id}>
-                {loc.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Checkout
-          <input
-            type="datetime-local"
-            name="checkOutAt"
-            required
-            defaultValue={defaultCheckOut()}
-            className="rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={pending}
-          className="rounded bg-black px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
-        >
-          {pending ? "Checking in…" : "Check in"}
-        </button>
-      </form>
-
-      {state?.error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{state.error}</p>
-      )}
-
-      {state && !state.error && (
-        <div className="rounded bg-amber-50 p-3 text-xs">
-          <p className="font-medium text-amber-800">
-            {state.guestName} is checked in. Send this activation link to their phone — it
-            won&apos;t be shown again:
-          </p>
-          <p className="mt-1 break-all text-amber-700">{state.activationUrl}</p>
-        </div>
-      )}
-    </div>
+    <form action={formAction} className="flex flex-col gap-4" key={state?.nonce ?? 0}>
+      {state?.error && <Alert tone="error">{state.error}</Alert>}
+      <Field label="Guest name" htmlFor="guestFullName">
+        <Input id="guestFullName" name="guestFullName" required maxLength={120} autoComplete="off" />
+      </Field>
+      <Field label="Room" htmlFor="locationId">
+        <Select id="locationId" name="locationId" defaultValue="">
+          <option value="">No room (walk-in, day guest)</option>
+          {locations.map((loc) => (
+            <option key={loc.id} value={loc.id}>
+              {loc.name}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field label="Checkout" htmlFor="checkOutAt" hint={`Property time (${timezoneLabel}). Access ends then.`}>
+        <Input id="checkOutAt" type="datetime-local" name="checkOutAt" required defaultValue={defaultCheckOut} />
+      </Field>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Email" htmlFor="guestEmail" optional>
+          <Input id="guestEmail" type="email" name="guestEmail" maxLength={254} autoComplete="off" />
+        </Field>
+        <Field label="Phone" htmlFor="guestPhone" optional>
+          <Input id="guestPhone" type="tel" name="guestPhone" maxLength={40} autoComplete="off" />
+        </Field>
+      </div>
+      <SubmitButton pendingLabel="Checking in" size="lg" block>
+        Check in guest
+      </SubmitButton>
+    </form>
   );
 }

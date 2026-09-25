@@ -138,21 +138,26 @@ export const ROW_LEVEL_RULES: Partial<
     }
     return true;
   },
+  // Department and ownership limits apply to the STAFF role only. Managers
+  // and owners run the whole operation (spec section 14: they "manage
+  // requests"), so they can accept, start and finish any request, e.g. to
+  // cover for someone who went off shift.
   "request:accept": (actor, resource) => {
-    if (actor.kind !== "staff") return true;
-    const unclaimed = !resource.assignedMembershipId;
-    const sameDepartment =
+    if (actor.kind !== "staff" || actor.role !== "STAFF") return true;
+    // A request a manager assigned to this person is theirs to accept.
+    if (resource.assignedMembershipId) return resource.assignedMembershipId === actor.membershipId;
+    return (
       resource.departmentId === null ||
       resource.departmentId === undefined ||
-      resource.departmentId === actor.departmentId;
-    return unclaimed && sameDepartment;
+      resource.departmentId === actor.departmentId
+    );
   },
   "request:start": (actor, resource) => {
-    if (actor.kind !== "staff") return true;
+    if (actor.kind !== "staff" || actor.role !== "STAFF") return true;
     return resource.assignedMembershipId === actor.membershipId;
   },
   "request:complete": (actor, resource) => {
-    if (actor.kind !== "staff") return true;
+    if (actor.kind !== "staff" || actor.role !== "STAFF") return true;
     return resource.assignedMembershipId === actor.membershipId;
   },
   "request:cancel_own": (actor, resource) => {

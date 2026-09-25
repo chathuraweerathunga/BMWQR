@@ -4,6 +4,9 @@ import { env } from "@/lib/env";
 import { createGuest } from "@/modules/guests/repository";
 import { createSessionForStay } from "@/modules/guest-sessions/repository";
 import { logAudit } from "@/modules/audit/service";
+import { getLocationById } from "@/modules/locations/repository";
+import { ValidationError } from "@/lib/errors";
+import QRCode from "qrcode";
 import * as repo from "./repository";
 
 export interface CheckInGuestInput {
@@ -34,9 +37,24 @@ export async function checkInGuest(actor: StaffActor, input: CheckInGuestInput) 
     resource: { businessId: actor.businessId },
   });
 
+  const fullName = input.guestFullName.trim();
+  if (!fullName || fullName.length > 120) {
+    throw new ValidationError("Enter the guest's name (up to 120 characters).");
+  }
+  if (input.checkOutAt.getTime() <= Date.now()) {
+    throw new ValidationError("Checkout must be in the future.");
+  }
+  if (input.locationId) {
+    // Tenant-scoped lookup: another business's location id is "not found".
+    const location = await getLocationById(actor.businessId, input.locationId);
+    if (!location || location.status !== "ACTIVE") {
+      throw new ValidationError("That room isn't available. Choose another.");
+    }
+  }
+
   const guest = await createGuest({
     businessId: actor.businessId,
-    fullName: input.guestFullName,
+    fullName,
     email: input.guestEmail,
     phone: input.guestPhone,
   });
@@ -69,7 +87,11 @@ export async function checkInGuest(actor: StaffActor, input: CheckInGuestInput) 
     },
   });
 
-  return { guest, guestStay, activationUrl: activationUrl.toString() };
+  // A scannable version of the same link, so reception can show it on
+  // screen and the guest opens guest services with their phone camera.
+  const activationQr = await QRCode.toDataURL(activationUrl.toString(), { margin: 1, width: 320 });
+
+  return { guest, guestStay, activationUrl: activationUrl.toString(), activationQr };
 }
 
 /**

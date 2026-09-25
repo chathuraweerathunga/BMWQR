@@ -8,6 +8,34 @@ import type { CreateBusinessInput, UpdateBusinessCoreInput, UpdateBusinessSettin
 
 const SLUG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const MIN_PASSWORD_LENGTH = 8;
+// scrypt cost grows with input length; cap it so a megabyte "password"
+// can't be used to burn server CPU.
+const MAX_PASSWORD_LENGTH = 200;
+const MAX_NAME_LENGTH = 120;
+const MIN_SLUG_LENGTH = 3;
+const MAX_SLUG_LENGTH = 48;
+
+/**
+ * Workspace URLs live at the top level (`/{slug}/dashboard`), next to the
+ * app's own routes. A business must never claim a slug that is, or may
+ * become, a platform route.
+ */
+export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
+  "admin", "api", "app", "assets", "auth", "billing", "dashboard", "docs", "help",
+  "login", "logout", "manager", "oneweb", "platform", "portal", "pricing", "privacy",
+  "qr", "register", "settings", "signin", "signout", "signup", "static", "status",
+  "support", "terms", "www", "_next",
+]);
+
+/** Returns the timezone if the runtime recognises it, otherwise UTC. */
+export function normalizeTimeZone(timeZone: string | null | undefined): string {
+  if (!timeZone) return "UTC";
+  try {
+    return new Intl.DateTimeFormat("en", { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    return "UTC";
+  }
+}
 
 export interface SignUpBusinessInput {
   businessName: string;
@@ -16,6 +44,8 @@ export interface SignUpBusinessInput {
   ownerName: string;
   ownerEmail: string;
   ownerPassword: string;
+  /** IANA timezone detected from the owner's browser; editable later. */
+  timezone?: string | null;
 }
 
 /**
@@ -37,6 +67,14 @@ export interface SignUpBusinessInput {
  */
 export async function signUpBusiness(input: SignUpBusinessInput) {
   const slug = input.businessSlug.trim().toLowerCase();
+  if (slug.length < MIN_SLUG_LENGTH || slug.length > MAX_SLUG_LENGTH) {
+    throw new ValidationError(
+      `Workspace URL must be ${MIN_SLUG_LENGTH}–${MAX_SLUG_LENGTH} characters long.`,
+    );
+  }
+  if (RESERVED_SLUGS.has(slug)) {
+    throw new ValidationError("That workspace URL is reserved — please choose another.");
+  }
   if (!SLUG_PATTERN.test(slug)) {
     throw new ValidationError(
       "Workspace URL must be lowercase letters, numbers and hyphens only (e.g. ocean-pearl-resort).",
@@ -51,12 +89,22 @@ export async function signUpBusiness(input: SignUpBusinessInput) {
   if (input.ownerPassword.length < MIN_PASSWORD_LENGTH) {
     throw new ValidationError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
   }
+  if (input.ownerPassword.length > MAX_PASSWORD_LENGTH) {
+    throw new ValidationError(`Password must be at most ${MAX_PASSWORD_LENGTH} characters.`);
+  }
+  if (input.businessName.trim().length > MAX_NAME_LENGTH || input.ownerName.trim().length > MAX_NAME_LENGTH) {
+    throw new ValidationError(`Names must be at most ${MAX_NAME_LENGTH} characters.`);
+  }
+  const ownerEmail = input.ownerEmail.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail) || ownerEmail.length > 254) {
+    throw new ValidationError("Please enter a valid email address.");
+  }
 
   const existingBusiness = await repo.getBusinessBySlug(slug);
   if (existingBusiness) {
     throw new ValidationError("That workspace URL is already taken — please choose another.");
   }
-  const existingUser = await findUserByEmail(input.ownerEmail);
+  const existingUser = await findUserByEmail(ownerEmail);
   if (existingUser) {
     throw new ValidationError("An account with that email already exists — please sign in instead.");
   }
@@ -65,10 +113,11 @@ export async function signUpBusiness(input: SignUpBusinessInput) {
     slug,
     name: input.businessName.trim(),
     type: input.businessType,
+    timezone: normalizeTimeZone(input.timezone),
   });
 
   const owner = await createStaffUser({
-    email: input.ownerEmail,
+    email: ownerEmail,
     password: input.ownerPassword,
     name: input.ownerName.trim(),
   });
@@ -112,8 +161,20 @@ export async function updateBusinessCore(actor: StaffActor, patch: UpdateBusines
     resource: { businessId: actor.businessId },
   });
 
-  if (patch.name !== undefined && !patch.name.trim()) {
-    throw new ValidationError("Business name cannot be empty.");
+  if (patch.name !== undefined) {
+    if (!patch.name.trim()) throw new ValidationError("Business name cannot be empty.");
+    if (patch.name.trim().length > MAX_NAME_LENGTH) throw new ValidationError(`Keep the name under ${MAX_NAME_LENGTH} characters.`);
+    patch = { ...patch, name: patch.name.trim() };
+  }
+  if (patch.timezone !== undefined) {
+    const tz = normalizeTimeZone(patch.timezone);
+    if (tz === "UTC" && patch.timezone !== "UTC" && patch.timezone !== "Etc/UTC") {
+      throw new ValidationError("Choose a timezone from the list.");
+    }
+    patch = { ...patch, timezone: tz };
+  }
+  if (patch.currency !== undefined && !/^[A-Z]{3}$/.test(patch.currency)) {
+    throw new ValidationError("Currency must be a three-letter code such as LKR or USD.");
   }
 
   const updated = await repo.updateBusinessCore(actor.businessId, patch);
@@ -140,14 +201,65 @@ export async function updateBusinessSettings(actor: StaffActor, patch: UpdateBus
     resource: { businessId: actor.businessId },
   });
 
-  const updated = await repo.updateBusinessSettings(actor.businessId, patch);
+  const clean = validateSettingsPatch(patch);
+  const updated = await repo.updateBusinessSettings(actor.businessId, clean);
 
   await logAudit(actor, {
     action: "business.settings_updated",
     entityType: "BusinessSettings",
     entityId: actor.businessId,
-    newValue: patch as Record<string, unknown>,
+    newValue: clean as Record<string, unknown>,
   });
 
   return updated;
+}
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+function httpsUrlOrNull(value: string | null | undefined, field: string, httpAllowed = false): string | null {
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ValidationError(`${field} must be a full web address starting with https://`);
+  }
+  if (url.protocol !== "https:" && !(httpAllowed && url.protocol === "http:")) {
+    throw new ValidationError(`${field} must start with https://`);
+  }
+  if (value.length > 500) throw new ValidationError(`${field} is too long.`);
+  return url.toString();
+}
+
+/**
+ * Branding and contact values end up on guest-facing pages (the logo as an
+ * image source, the color in a style attribute), so they are checked
+ * strictly here, not just in the form.
+ */
+export function validateSettingsPatch(patch: UpdateBusinessSettingsInput): UpdateBusinessSettingsInput {
+  const out: UpdateBusinessSettingsInput = { ...patch };
+  for (const key of ["primaryColor", "secondaryColor"] as const) {
+    const v = patch[key];
+    if (v !== undefined && v !== null && !HEX_COLOR.test(v)) throw new ValidationError("Colors must look like #1d6258.");
+    if (v) out[key] = v.toLowerCase();
+  }
+  if (patch.logoUrl !== undefined) out.logoUrl = httpsUrlOrNull(patch.logoUrl, "Logo address");
+  if (patch.coverImageUrl !== undefined) out.coverImageUrl = httpsUrlOrNull(patch.coverImageUrl, "Cover image address");
+  if (patch.website !== undefined) out.website = httpsUrlOrNull(patch.website, "Website", true);
+  if (patch.contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patch.contactEmail)) {
+    throw new ValidationError("Enter a valid contact email.");
+  }
+  if (patch.phone && !/^[+()\d\s-]{5,30}$/.test(patch.phone)) {
+    throw new ValidationError("Enter a phone number using digits, spaces, + and -.");
+  }
+  const limits: Array<[keyof UpdateBusinessSettingsInput, number]> = [
+    ["welcomeMessage", 280],
+    ["description", 1000],
+    ["address", 300],
+  ];
+  for (const [key, max] of limits) {
+    const v = patch[key];
+    if (typeof v === "string" && v.length > max) throw new ValidationError(`Keep that under ${max} characters.`);
+  }
+  return out;
 }

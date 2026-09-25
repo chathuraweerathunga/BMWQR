@@ -189,6 +189,44 @@ describe("authorize: row-level rules", () => {
     expect(result).toEqual({ allowed: false, reason: "NOT_ASSIGNED" });
   });
 
+  it("lets STAFF accept a NEW request a manager assigned to them, even across departments", () => {
+    const result = authorize({
+      actor: staff({ membershipId: "mem_1", departmentId: "dept_housekeeping" }),
+      action: "request:accept",
+      resource: { businessId: BUSINESS_A, departmentId: "dept_maintenance", assignedMembershipId: "mem_1" },
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  it("lets a MANAGER with no department accept a department-routed request", () => {
+    const result = authorize({
+      actor: staff({ role: "MANAGER", departmentId: null }),
+      action: "request:accept",
+      resource: { businessId: BUSINESS_A, departmentId: "dept_housekeeping", assignedMembershipId: null },
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  it("lets a MANAGER finish a request someone else started", () => {
+    for (const action of ["request:start", "request:complete"] as const) {
+      const result = authorize({
+        actor: staff({ role: "MANAGER", membershipId: "mem_mgr" }),
+        action,
+        resource: { businessId: BUSINESS_A, assignedMembershipId: "mem_2" },
+      });
+      expect(result.allowed).toBe(true);
+    }
+  });
+
+  it("still keeps a MANAGER inside their own business", () => {
+    const result = authorize({
+      actor: staff({ role: "MANAGER" }),
+      action: "request:complete",
+      resource: { businessId: BUSINESS_B, assignedMembershipId: null },
+    });
+    expect(result).toEqual({ allowed: false, reason: "CROSS_TENANT" });
+  });
+
   it("lets a guest view their own request", () => {
     const result = authorize({
       actor: guest({ guestId: "guest_1" }),

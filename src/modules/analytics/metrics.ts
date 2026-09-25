@@ -4,6 +4,10 @@
  * as modules/requests/state-machine.ts.
  */
 
+/** Overdue threshold for requests without a service time estimate. Shared
+ * by the manager overview and the staff board so they always agree. */
+export const DEFAULT_OVERDUE_MINUTES = 60;
+
 export interface TimingSample {
   createdAt: Date;
   acceptedAt: Date | null;

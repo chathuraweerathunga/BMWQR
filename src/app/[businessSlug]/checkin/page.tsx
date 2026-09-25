@@ -1,11 +1,28 @@
 import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import type { Metadata } from "next";
+import { BedDouble } from "lucide-react";
 import { getStaffContext } from "@/lib/staff-context";
+import { permissionsForActor } from "@/modules/auth/permissions";
 import { listActiveStaysForBusiness } from "@/modules/guest-stays/repository";
 import { listLocationsForBusiness } from "@/modules/locations/repository";
 import { checkInGuest, checkOutGuestStay } from "@/modules/guest-stays/service";
 import { AuthorizationError } from "@/modules/auth/types";
+import { ValidationError } from "@/lib/errors";
+import { formatDate, formatTime, utcToZonedLocal, zonedLocalToUtc } from "@/lib/format";
+import { PageHeader, Panel, PanelHeader, EmptyState } from "@/components/ui/Layout";
+import { Alert } from "@/components/ui/Alert";
+import { ConfirmSubmit } from "@/components/ui/ConfirmSubmit";
 import { CheckInForm } from "./CheckInForm";
 import type { CheckInRevealState } from "./types";
+
+export const metadata: Metadata = { title: "Guests" };
+
+/** Tomorrow at 11:00, property time: the most common checkout. */
+function defaultCheckOut(timeZone: string): string {
+  const tomorrow = new Date(new Date().getTime() + 24 * 60 * 60_000);
+  return `${utcToZonedLocal(tomorrow, timeZone).slice(0, 10)}T11:00`;
+}
 
 export default async function CheckInPage({
   params,
@@ -18,56 +35,47 @@ export default async function CheckInPage({
   const { error } = await searchParams;
   const { business, actor } = await getStaffContext(businessSlug);
 
-  // Route-level guard mirroring the QR page: the layout only hides the nav
-  // link for STAFF. `checkInGuest`/`checkOutGuestStay` re-check
-  // `guest_stay:create`/`guest_stay:checkout` regardless.
-  if (actor.role !== "BUSINESS_OWNER" && actor.role !== "MANAGER") {
-    redirect(`/${businessSlug}/dashboard`);
-  }
+  // Hiding the nav link is a convenience; this is the page's own check.
+  // The service functions re-check guest_stay:create / :checkout anyway.
+  if (!permissionsForActor(actor).has("guest_stay:create")) redirect(`/${businessSlug}/dashboard`);
 
+  const tz = business.timezone;
   const [activeStays, locations] = await Promise.all([
     listActiveStaysForBusiness(business.id),
     listLocationsForBusiness(business.id),
   ]);
+  const roomOptions = locations
+    .filter((l: { status: string }) => l.status === "ACTIVE")
+    .map((l: { id: string; name: string }) => ({ id: l.id, name: l.name }));
 
-  async function checkInAction(
-    _prevState: CheckInRevealState | null,
-    formData: FormData,
-  ): Promise<CheckInRevealState | null> {
+  async function checkInAction(_prev: CheckInRevealState | null, formData: FormData): Promise<CheckInRevealState | null> {
     "use server";
-    const guestFullName = formData.get("guestFullName");
-    const guestEmail = formData.get("guestEmail");
-    const guestPhone = formData.get("guestPhone");
-    const locationId = formData.get("locationId");
-    const checkOutAtRaw = formData.get("checkOutAt");
+    const text = (name: string) => {
+      const value = formData.get(name);
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const fail = (error: string): CheckInRevealState => ({ guestName: "", activationUrl: "", error });
 
-    if (typeof guestFullName !== "string" || guestFullName.trim().length === 0) {
-      return { guestName: "", activationUrl: "", error: "Guest name is required." };
-    }
-    if (typeof checkOutAtRaw !== "string" || checkOutAtRaw.length === 0) {
-      return { guestName: "", activationUrl: "", error: "Checkout date/time is required." };
-    }
-    const checkOutAt = new Date(checkOutAtRaw);
-    const submittedAt = new Date();
-    if (Number.isNaN(checkOutAt.getTime()) || checkOutAt.getTime() <= submittedAt.getTime()) {
-      return { guestName: "", activationUrl: "", error: "Checkout must be a valid future date/time." };
-    }
+    const guestFullName = text("guestFullName");
+    if (!guestFullName) return fail("Enter the guest's name.");
+    const checkOutAt = zonedLocalToUtc(text("checkOutAt"), tz);
+    if (!checkOutAt || checkOutAt.getTime() <= new Date().getTime()) return fail("Choose a checkout time in the future.");
 
     try {
-      const { guest, activationUrl } = await checkInGuest(actor, {
-        guestFullName: guestFullName.trim(),
-        guestEmail: typeof guestEmail === "string" && guestEmail.length > 0 ? guestEmail : null,
-        guestPhone: typeof guestPhone === "string" && guestPhone.length > 0 ? guestPhone : null,
-        locationId: typeof locationId === "string" && locationId.length > 0 ? locationId : null,
+      const { guest, activationUrl, activationQr } = await checkInGuest(actor, {
+        guestFullName,
+        guestEmail: text("guestEmail") || null,
+        guestPhone: text("guestPhone") || null,
+        locationId: text("locationId") || null,
         checkOutAt,
       });
-      return { guestName: guest.fullName, activationUrl };
+      revalidatePath(`/${businessSlug}/checkin`);
+      return { guestName: guest.fullName, activationUrl, activationQr, nonce: new Date().getTime() };
     } catch (err) {
-      const message =
-        err instanceof AuthorizationError
-          ? "You don't have permission to check in guests."
-          : "Something went wrong — please try again.";
-      return { guestName: "", activationUrl: "", error: message };
+      if (err instanceof ValidationError) return fail(err.message);
+      if (err instanceof AuthorizationError) return fail("You don't have permission to check guests in.");
+      console.error("[checkin] unexpected failure", err);
+      return fail("The guest couldn't be checked in. Try again.");
     }
   }
 
@@ -75,62 +83,82 @@ export default async function CheckInPage({
     "use server";
     const guestStayId = formData.get("guestStayId");
     if (typeof guestStayId !== "string") return;
-
     try {
       await checkOutGuestStay(actor, guestStayId);
     } catch (err) {
-      const message = err instanceof AuthorizationError ? "NOT_ALLOWED" : "UNKNOWN";
-      redirect(`/${businessSlug}/checkin?error=${message}`);
+      if (err instanceof AuthorizationError) redirect(`/${businessSlug}/checkin?error=NOT_ALLOWED`);
+      throw err;
     }
     redirect(`/${businessSlug}/checkin`);
   }
 
-  return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-lg font-semibold">Guest check-in</h1>
+  const tzLabel = tz.replace(/_/g, " ");
 
-      {error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
-          That action couldn&apos;t be completed ({error}).
-        </p>
+  return (
+    <>
+      <PageHeader
+        title="Guests"
+        description="Check guests in to give them guest services on their phone. Checking out ends their access immediately."
+      />
+
+      {error === "NOT_ALLOWED" && (
+        <Alert tone="error" className="mb-6">
+          You don&apos;t have permission to check guests out.
+        </Alert>
       )}
 
-      <CheckInForm action={checkInAction} locations={locations} />
+      <div className="grid items-start gap-6 lg:grid-cols-[380px_1fr]">
+        <Panel>
+          <PanelHeader title="Check in" />
+          <div className="p-5">
+            <CheckInForm
+              action={checkInAction}
+              locations={roomOptions}
+              defaultCheckOut={defaultCheckOut(tz)}
+              timezoneLabel={tzLabel}
+            />
+          </div>
+        </Panel>
 
-      <div>
-        <h2 className="mb-2 text-sm font-semibold">Currently checked in</h2>
-        {activeStays.length === 0 ? (
-          <p className="text-sm text-gray-500">No active guest stays.</p>
-        ) : (
-          <ul className="flex flex-col gap-3">
-            {activeStays.map((stay: (typeof activeStays)[number]) => (
-              <li
-                key={stay.id}
-                className="flex items-center justify-between rounded border border-gray-200 px-4 py-3"
-              >
-                <div>
-                  <p className="text-sm font-medium">
-                    {stay.guest.fullName}
-                    {stay.location ? ` · ${stay.location.name}` : ""}
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    Checkout: {stay.checkOutAt.toLocaleString()}
-                  </p>
-                </div>
-                <form action={checkOutAction}>
-                  <input type="hidden" name="guestStayId" value={stay.id} />
-                  <button
-                    type="submit"
-                    className="rounded border border-gray-300 px-3 py-1 text-xs font-medium"
-                  >
-                    Check out
-                  </button>
-                </form>
-              </li>
-            ))}
-          </ul>
-        )}
+        <Panel>
+          <PanelHeader
+            title="In house"
+            description={`${activeStays.length} ${activeStays.length === 1 ? "guest" : "guests"} checked in`}
+          />
+          {activeStays.length === 0 ? (
+            <div className="p-5">
+              <EmptyState icon={<BedDouble className="size-6" />} title="No one is checked in">
+                Guests you check in appear here until they check out.
+              </EmptyState>
+            </div>
+          ) : (
+            <ul className="divide-y divide-line">
+              {activeStays.map((stay: (typeof activeStays)[number]) => {
+                const overdue = stay.checkOutAt.getTime() < new Date().getTime();
+                return (
+                  <li key={stay.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
+                    <div className="grid size-11 shrink-0 place-items-center rounded-[var(--radius-control)] bg-lagoon-50 text-sm font-extrabold text-lagoon-800">
+                      {stay.location?.name.replace(/^room\s*/i, "").slice(0, 4) || "—"}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-bold">{stay.guest.fullName}</p>
+                      <p className="text-sm text-ink-faint">
+                        {stay.location?.name ?? "No room"}. Checks out {formatDate(stay.checkOutAt, tz)},{" "}
+                        {formatTime(stay.checkOutAt, tz)}
+                        {overdue && <span className="ml-1.5 font-semibold text-danger">(past checkout)</span>}
+                      </p>
+                    </div>
+                    <form action={checkOutAction}>
+                      <input type="hidden" name="guestStayId" value={stay.id} />
+                      <ConfirmSubmit confirmLabel="Check out now">Check out</ConfirmSubmit>
+                    </form>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Panel>
       </div>
-    </div>
+    </>
   );
 }

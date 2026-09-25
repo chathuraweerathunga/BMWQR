@@ -156,12 +156,12 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  memberships             BusinessMembership[]
-  createdGuestStays       GuestStay[]             @relation("GuestStayCreatedByUser")
-  requestsCreatedAsStaff  Request[]               @relation("RequestCreatedByStaff")
-  requestStatusChanges    RequestStatusHistory[]  @relation("RequestStatusChangedByUser")
-  uploadedAttachments     Attachment[]            @relation("AttachmentUploadedByUser")
-  auditLogEntries         AuditLog[]              @relation("AuditLogActorUser")
+  memberships            BusinessMembership[]
+  createdGuestStays      GuestStay[]            @relation("GuestStayCreatedByUser")
+  requestsCreatedAsStaff Request[]              @relation("RequestCreatedByStaff")
+  requestStatusChanges   RequestStatusHistory[] @relation("RequestStatusChangedByUser")
+  uploadedAttachments    Attachment[]           @relation("AttachmentUploadedByUser")
+  auditLogEntries        AuditLog[]             @relation("AuditLogActorUser")
 
   @@map("users")
 }
@@ -274,9 +274,10 @@ model Location {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
-  qrCodes    QRCode[]
-  requests   Request[]
-  guestStays GuestStay[]
+  qrCodes           QRCode[]
+  requests          Request[]
+  guestStays        GuestStay[]
+  guestSessionsHere GuestSession[] @relation("GuestSessionCurrentLocation")
 
   @@unique([businessId, id])
   @@index([businessId, type])
@@ -374,11 +375,11 @@ model Guest {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  stays               GuestStay[]
-  requestsCreated     Request[]              @relation("RequestCreatedByGuest")
+  stays                GuestStay[]
+  requestsCreated      Request[]              @relation("RequestCreatedByGuest")
   statusChangesAsGuest RequestStatusHistory[] @relation("RequestStatusChangedByGuest")
-  attachmentsUploaded Attachment[]           @relation("AttachmentUploadedByGuest")
-  feedbackGiven       Feedback[]
+  attachmentsUploaded  Attachment[]           @relation("AttachmentUploadedByGuest")
+  feedbackGiven        Feedback[]
 
   @@unique([businessId, id])
   @@index([businessId, email])
@@ -421,20 +422,26 @@ model GuestStay {
 /// cookie — the raw token is never persisted server-side. See
 /// lib/security/guest-session-token.ts.
 model GuestSession {
-  id             String    @id @default(cuid())
-  businessId     String
-  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  guestStayId    String
-  guestStay      GuestStay @relation(fields: [businessId, guestStayId], references: [businessId, id])
-  tokenHash      String    @unique
-  originQrCodeId String?
-  originQrCode   QRCode?   @relation(fields: [businessId, originQrCodeId], references: [businessId, id])
-  issuedAt       DateTime  @default(now())
-  expiresAt      DateTime
-  revokedAt      DateTime?
-  lastSeenAt     DateTime?
-  userAgent      String?
-  createdAt      DateTime  @default(now())
+  id                String    @id @default(cuid())
+  businessId        String
+  business          Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  guestStayId       String
+  guestStay         GuestStay @relation(fields: [businessId, guestStayId], references: [businessId, id])
+  tokenHash         String    @unique
+  originQrCodeId    String?
+  originQrCode      QRCode?   @relation(fields: [businessId, originQrCodeId], references: [businessId, id])
+  /// Where the guest most recently scanned a QR code. Set ONLY by the
+  /// server-side QR scan flow, never from client input, so a guest's
+  /// requests are routed to a location the server itself resolved
+  /// (project instructions sections 6 and 20).
+  currentLocationId String?
+  currentLocation   Location? @relation("GuestSessionCurrentLocation", fields: [businessId, currentLocationId], references: [businessId, id])
+  issuedAt          DateTime  @default(now())
+  expiresAt         DateTime
+  revokedAt         DateTime?
+  lastSeenAt        DateTime?
+  userAgent         String?
+  createdAt         DateTime  @default(now())
 
   @@unique([businessId, id])
   @@index([businessId, guestStayId])

@@ -56,3 +56,12 @@ export async function updateLocationStatus(
     data: { status },
   });
 }
+
+/** Bulk insert for a numbered range. Every row carries the caller's
+ * businessId; the composite FK keeps parents inside the same tenant. */
+export async function createLocationsMany(
+  rows: Array<{ businessId: string; name: string; type: LocationType; parentLocationId: string | null }>,
+) {
+  if (rows.length === 0) return { count: 0 };
+  return prisma.location.createMany({ data: rows });
+}

@@ -26,7 +26,7 @@ export async function GET(
   { params }: { params: Promise<{ token: string }> },
 ) {
   const ip = getClientIp(request.headers);
-  const limitResult = rateLimit(`qr-scan:${ip}`, QR_SCAN_LIMIT, QR_SCAN_WINDOW_MS);
+  const limitResult = await rateLimit(`qr-scan:${ip}`, QR_SCAN_LIMIT, QR_SCAN_WINDOW_MS);
   if (!limitResult.allowed) {
     return NextResponse.redirect(new URL("/portal?error=RATE_LIMITED", request.url));
   }
@@ -40,7 +40,7 @@ export async function GET(
     return NextResponse.redirect(new URL(`/portal?error=${result.reason}`, request.url));
   }
 
-  return NextResponse.redirect(
-    new URL(`/portal?location=${encodeURIComponent(result.locationId)}`, request.url),
-  );
+  // The scanned location is now stored on the guest's session server-side
+  // (see scanQr), so nothing about it travels in the URL.
+  return NextResponse.redirect(new URL("/portal?scanned=1", request.url));
 }

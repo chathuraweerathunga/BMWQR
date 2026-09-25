@@ -12,6 +12,9 @@ export interface CreateRequestInput {
   description?: string | null;
   priority?: "LOW" | "NORMAL" | "HIGH" | "URGENT";
   createdByGuestId: string;
+  /** When the request should be done by, derived from the service's
+   * estimated minutes. Drives the "overdue" metrics. */
+  dueAt?: Date | null;
 }
 
 /** Creates a Request and its initial (null → NEW) history row atomically,
@@ -29,6 +32,7 @@ export async function createRequest(input: CreateRequestInput) {
         description: input.description ?? null,
         priority: input.priority ?? "NORMAL",
         createdByGuestId: input.createdByGuestId,
+        dueAt: input.dueAt ?? null,
       },
     });
     await tx.requestStatusHistory.create({
@@ -57,7 +61,26 @@ export interface ListRequestsFilter {
   /** When true (used for a STAFF actor's own queue), matches requests
    * that are either unassigned OR assigned to `assignedMembershipId`. */
   unassignedOrOwnedBy?: string;
+  /** A STAFF member's actionable queue: assigned to them, or unassigned
+   * in their department (or with no department). Mirrors the
+   * `request:accept` row rule so the board never offers an action that
+   * authorize() would refuse. */
+  staffQueue?: { membershipId: string; departmentId: string | null };
   locationId?: string;
+  /** Cap on rows returned (history views). */
+  limit?: number;
+}
+
+export function staffQueueWhere(queue: { membershipId: string; departmentId: string | null }) {
+  return {
+    OR: [
+      { assignedMembershipId: queue.membershipId },
+      {
+        assignedMembershipId: null,
+        OR: [{ departmentId: null }, ...(queue.departmentId ? [{ departmentId: queue.departmentId }] : [])],
+      },
+    ],
+  };
 }
 
 /** Includes the display fields a staff/manager list view needs, so the UI
@@ -77,15 +100,18 @@ export async function listRequestsForBusiness(businessId: string, filter: ListRe
             ],
           }
         : {}),
+      ...(filter.staffQueue ? staffQueueWhere(filter.staffQueue) : {}),
       ...(filter.locationId ? { locationId: filter.locationId } : {}),
     },
     include: {
       location: { select: { id: true, name: true } },
-      service: { select: { id: true, name: true } },
+      service: { select: { id: true, name: true, icon: true } },
       department: { select: { id: true, name: true } },
       assignedMembership: { include: { user: { select: { name: true } } } },
+      guestStay: { select: { guest: { select: { fullName: true } } } },
     },
     orderBy: { createdAt: "desc" },
+    ...(filter.limit ? { take: filter.limit } : {}),
   });
 }
 
@@ -158,5 +184,34 @@ export async function getRequestStatusHistory(businessId: string, requestId: str
   return prisma.requestStatusHistory.findMany({
     where: { businessId, requestId },
     orderBy: { createdAt: "asc" },
+  });
+}
+
+/** A guest's own requests with everything the portal's status view shows:
+ * where, what, and each status change in order. Scoped by business AND
+ * stay, so a guest only ever sees their own stay's requests. */
+export async function listRequestsForGuestStayDetailed(businessId: string, guestStayId: string) {
+  return prisma.request.findMany({
+    where: { businessId, guestStayId },
+    include: {
+      location: { select: { name: true } },
+      service: { select: { name: true, icon: true, estimatedMinutes: true } },
+      statusHistory: { select: { toStatus: true, createdAt: true }, orderBy: { createdAt: "asc" } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  });
+}
+
+/**
+ * Sets (or clears) who a request is assigned to, without changing its
+ * status. Only while the request is still open. Tenant-scoped in the WHERE
+ * clause, and the composite foreign key rejects a membership from another
+ * business at the database level.
+ */
+export async function setAssignment(businessId: string, requestId: string, membershipId: string | null) {
+  return prisma.request.updateMany({
+    where: { id: requestId, businessId, status: { in: ["NEW", "ACCEPTED", "IN_PROGRESS"] } },
+    data: { assignedMembershipId: membershipId },
   });
 }

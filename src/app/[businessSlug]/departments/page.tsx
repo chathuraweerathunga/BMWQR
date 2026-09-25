@@ -1,97 +1,155 @@
 import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import type { Metadata } from "next";
+import { Building2, Plus } from "lucide-react";
 import { getStaffContext } from "@/lib/staff-context";
+import { permissionsForActor } from "@/modules/auth/permissions";
 import { listDepartmentsForBusiness } from "@/modules/departments/repository";
-import { createDepartment } from "@/modules/departments/service";
-import { AuthorizationError } from "@/modules/auth/types";
-import { ValidationError } from "@/lib/errors";
+import { createDepartment, updateDepartment } from "@/modules/departments/service";
+import { listStaffForBusiness } from "@/modules/staff/repository";
+import { listAllServicesForBusiness } from "@/modules/services/repository";
+import { runAction, textField } from "@/lib/actions";
+import { ActionForm, type ActionResult } from "@/components/ui/ActionForm";
+import { EmptyState, PageHeader, Panel, PanelHeader } from "@/components/ui/Layout";
+import { Field, Input } from "@/components/ui/Form";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 
-export default async function DepartmentsPage({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ businessSlug: string }>;
-  searchParams: Promise<{ error?: string }>;
-}) {
+export const metadata: Metadata = { title: "Departments" };
+
+const SUGGESTED = ["Housekeeping", "Maintenance", "Room Service", "Front Office", "Concierge", "Restaurant", "Spa", "Security"];
+
+export default async function DepartmentsPage({ params }: { params: Promise<{ businessSlug: string }> }) {
   const { businessSlug } = await params;
-  const { error } = await searchParams;
   const { business, actor } = await getStaffContext(businessSlug);
+  if (!permissionsForActor(actor).has("department:manage")) redirect(`/${businessSlug}/dashboard`);
 
-  // Route-level guard mirroring qr/checkin/manager/settings: the layout
-  // only hides the nav link for STAFF. `createDepartment` re-checks
-  // `department:manage` regardless.
-  if (actor.role !== "BUSINESS_OWNER" && actor.role !== "MANAGER") {
-    redirect(`/${businessSlug}/dashboard`);
+  const [departments, staff, services] = await Promise.all([
+    listDepartmentsForBusiness(business.id),
+    listStaffForBusiness(business.id),
+    listAllServicesForBusiness(business.id),
+  ]);
+  const path = `/${businessSlug}/departments`;
+  const existing = new Set(departments.map((d: { name: string }) => d.name.toLowerCase()));
+  const suggestions = SUGGESTED.filter((s) => !existing.has(s.toLowerCase()));
+
+  const countBy = (rows: Array<{ departmentId: string | null; status?: string }>, id: string) =>
+    rows.filter((r) => r.departmentId === id && (r.status === undefined || r.status === "ACTIVE")).length;
+
+  async function create(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
+    "use server";
+    const result = await runAction("departments.create", async () => {
+      const d = await createDepartment(actor, {
+        name: textField(formData, "name") ?? "",
+        description: textField(formData, "description"),
+      });
+      return `Added ${d.name}.`;
+    });
+    revalidatePath(path);
+    return result;
   }
 
-  const departments = await listDepartmentsForBusiness(business.id);
-
-  async function createAction(formData: FormData) {
+  async function quickAdd(formData: FormData) {
     "use server";
-    const name = formData.get("name");
-    const description = formData.get("description");
-    if (typeof name !== "string" || !name.trim()) {
-      redirect(`/${businessSlug}/departments?error=${encodeURIComponent("Department name is required.")}`);
-    }
+    const name = textField(formData, "name");
+    if (name) await runAction("departments.quick", async () => void (await createDepartment(actor, { name })));
+    revalidatePath(path);
+  }
 
-    try {
-      await createDepartment(actor, {
-        name: name as string,
-        description: typeof description === "string" && description.trim() ? description : null,
+  async function rename(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
+    "use server";
+    const id = textField(formData, "departmentId");
+    const result = await runAction("departments.rename", async () => {
+      if (!id) return;
+      await updateDepartment(actor, id, {
+        name: textField(formData, "name") ?? "",
+        description: textField(formData, "description"),
       });
-    } catch (err) {
-      const message =
-        err instanceof AuthorizationError
-          ? "You don't have permission to manage departments."
-          : err instanceof ValidationError
-            ? err.message
-            : "Something went wrong — please try again.";
-      redirect(`/${businessSlug}/departments?error=${encodeURIComponent(message)}`);
-    }
-    redirect(`/${businessSlug}/departments`);
+      return "Saved.";
+    });
+    revalidatePath(path);
+    return result;
   }
 
   return (
-    <div className="flex max-w-lg flex-col gap-4">
-      <h1 className="text-lg font-semibold">Departments</h1>
+    <>
+      <PageHeader
+        title="Departments"
+        description="Teams that handle requests. Each service is routed to a department, and staff can belong to one."
+      />
 
-      {error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
-          {decodeURIComponent(error)}
-        </p>
-      )}
+      <div className="grid items-start gap-6 lg:grid-cols-[360px_1fr]">
+        <Panel>
+          <PanelHeader title="Add a department" />
+          <div className="flex flex-col gap-5 p-5">
+            {suggestions.length > 0 && (
+              <div>
+                <p className="text-sm font-semibold">Common for hotels</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {suggestions.map((name) => (
+                    <form key={name} action={quickAdd}>
+                      <input type="hidden" name="name" value={name} />
+                      <SubmitButton variant="secondary" size="sm" pendingLabel={name}>
+                        <Plus className="size-3.5" aria-hidden />
+                        {name}
+                      </SubmitButton>
+                    </form>
+                  ))}
+                </div>
+              </div>
+            )}
+            <ActionForm action={create} className="flex flex-col gap-4">
+              <Field label="Name" htmlFor="name">
+                <Input id="name" name="name" required maxLength={60} placeholder="Guest Relations" />
+              </Field>
+              <Field label="Description" htmlFor="description" optional>
+                <Input id="description" name="description" maxLength={200} />
+              </Field>
+              <SubmitButton pendingLabel="Adding">Add department</SubmitButton>
+            </ActionForm>
+          </div>
+        </Panel>
 
-      <form action={createAction} className="flex flex-col gap-2 rounded border border-gray-200 p-4">
-        <h2 className="text-sm font-semibold">New department</h2>
-        <input
-          name="name"
-          placeholder="e.g. Housekeeping"
-          required
-          className="rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <input
-          name="description"
-          placeholder="Description (optional)"
-          className="rounded border border-gray-300 px-3 py-2 text-sm"
-        />
-        <button
-          type="submit"
-          className="self-start rounded bg-black px-3 py-1.5 text-xs font-medium text-white"
-        >
-          Add department
-        </button>
-      </form>
-
-      <ul className="flex flex-col gap-2">
-        {departments.length === 0 && (
-          <p className="text-sm text-gray-500">No departments yet.</p>
-        )}
-        {departments.map((dept: (typeof departments)[number]) => (
-          <li key={dept.id} className="rounded border border-gray-200 px-4 py-3">
-            <p className="text-sm font-medium">{dept.name}</p>
-            {dept.description && <p className="text-xs text-gray-500">{dept.description}</p>}
-          </li>
-        ))}
-      </ul>
-    </div>
+        <Panel className="overflow-hidden">
+          <PanelHeader title="Your departments" description={`${departments.length} in total`} />
+          {departments.length === 0 ? (
+            <div className="p-5">
+              <EmptyState icon={<Building2 className="size-6" />} title="No departments yet">
+                Add the teams that will handle guest requests.
+              </EmptyState>
+            </div>
+          ) : (
+            <ul className="divide-y divide-line">
+              {departments.map((d: { id: string; name: string; description: string | null }) => (
+                <li key={d.id} className="px-5 py-4">
+                  <details className="group">
+                    <summary className="flex cursor-pointer list-none items-center gap-4 [&::-webkit-details-marker]:hidden">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-bold">{d.name}</p>
+                        {d.description && <p className="text-sm text-ink-soft">{d.description}</p>}
+                      </div>
+                      <p className="hidden text-sm text-ink-faint sm:block tabular">
+                        {countBy(staff, d.id)} staff, {countBy(services.map((s: { departmentId: string | null }) => ({ departmentId: s.departmentId })), d.id)} services
+                      </p>
+                      <span className="text-sm font-semibold text-lagoon-700 group-open:hidden">Edit</span>
+                      <span className="hidden text-sm font-semibold text-ink-faint group-open:inline">Close</span>
+                    </summary>
+                    <ActionForm action={rename} resetOnSuccess={false} className="mt-4 grid gap-3 sm:grid-cols-[1fr_1.4fr_auto] sm:items-end">
+                      <input type="hidden" name="departmentId" value={d.id} />
+                      <Field label="Name" htmlFor={`n-${d.id}`}>
+                        <Input id={`n-${d.id}`} name="name" defaultValue={d.name} required maxLength={60} />
+                      </Field>
+                      <Field label="Description" htmlFor={`d-${d.id}`} optional>
+                        <Input id={`d-${d.id}`} name="description" defaultValue={d.description ?? ""} maxLength={200} />
+                      </Field>
+                      <SubmitButton pendingLabel="Saving">Save</SubmitButton>
+                    </ActionForm>
+                  </details>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+      </div>
+    </>
   );
 }

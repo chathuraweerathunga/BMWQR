@@ -8,8 +8,8 @@ machine, QR/guest-session security, analytics, rate limiting).
 
 ## Stack
 
-Next.js 16 (App Router) · TypeScript (strict) · Tailwind CSS · Prisma ·
-PostgreSQL · Vitest.
+Next.js 16 (App Router) · TypeScript (strict) · Tailwind CSS 4 · Prisma ·
+PostgreSQL · Auth.js · Vitest · lucide-react · self-hosted Manrope + Fraunces.
 
 ## Getting started
 
@@ -18,19 +18,16 @@ npm install
 cp .env.example .env   # fill in DATABASE_URL and AUTH_SECRET
 
 npm run db:generate
-npm run db:migrate -- --name init
-npm run db:seed      # creates the "Ocean Pearl Resort" example tenant
+# Apply each migration in prisma/migrations/ in order, e.g.:
+for f in prisma/migrations/*/migration.sql; do psql "$DATABASE_URL" -f "$f"; done
+npm run db:seed        # demo "Ocean Pearl Resort" tenant (never in production)
 
 npm run dev
 ```
 
-Prisma runs in engine-less "js" mode here (`prisma.config.ts` +
-`@prisma/adapter-pg` + `engineType = "client"` in
-`prisma/schema.prisma`) rather than the classic native-binary engines —
-see docs/ARCHITECTURE.md for why and what that changes. This has been
-run and verified end-to-end (migrations applied, seed run, dev server
-serving the guest portal and staff dashboard against a real Postgres
-database) against local PostgreSQL 16.
+Deploying: see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) (Vercel +
+Supabase, environment variables, and the security migration that must be
+applied).
 
 Two ways to try it:
 

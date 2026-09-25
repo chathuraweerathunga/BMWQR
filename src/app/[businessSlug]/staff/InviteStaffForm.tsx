@@ -1,86 +1,103 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
+import { UserPlus } from "lucide-react";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { CopyButton } from "@/components/ui/CopyButton";
+import { Field, Input, Select } from "@/components/ui/Form";
+import { SubmitButton } from "@/components/ui/SubmitButton";
 import type { InviteRevealState } from "./types";
 
-type Department = { id: string; name: string };
+const ROLE_OPTIONS = [
+  { value: "STAFF", label: "Staff", hint: "Handles requests" },
+  { value: "MANAGER", label: "Manager", hint: "Runs operations and setup" },
+  { value: "BUSINESS_OWNER", label: "Owner", hint: "Everything, including team access" },
+];
 
-const ROLES = ["STAFF", "MANAGER", "BUSINESS_OWNER"] as const;
-
+/**
+ * Adds a team member with a temporary password shown once. They sign in
+ * with it and change it from their account page.
+ */
 export function InviteStaffForm({
   action,
   departments,
   canAssignOwner,
+  signInUrl,
 }: {
-  action: (
-    prevState: InviteRevealState | null,
-    formData: FormData,
-  ) => Promise<InviteRevealState | null>;
-  departments: Department[];
+  action: (prev: InviteRevealState | null, formData: FormData) => Promise<InviteRevealState | null>;
+  departments: Array<{ id: string; name: string }>;
   canAssignOwner: boolean;
+  signInUrl: string;
 }) {
-  const [state, formAction, pending] = useActionState(action, null);
+  const [state, formAction] = useActionState(action, null);
+  const [dismissed, setDismissed] = useState<number | undefined>(undefined);
+
+  if (state && !state.error && state.temporaryPassword && state.nonce !== dismissed) {
+    const message = `Hi ${state.name}, your OneWeb account is ready.\nSign in: ${signInUrl}\nEmail: ${state.email}\nTemporary password: ${state.temporaryPassword}\nPlease change it after signing in.`;
+    return (
+      <div className="animate-ticket-in flex flex-col gap-4">
+        <Alert tone="success" title={`${state.name} is added`}>
+          Give them these sign-in details. The password is shown once; they should change it after signing in.
+        </Alert>
+        <dl className="grid gap-2 rounded-[var(--radius-control)] bg-sunken p-4 text-sm">
+          <div className="flex justify-between gap-3">
+            <dt className="text-ink-faint">Email</dt>
+            <dd className="font-semibold break-all">{state.email}</dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-ink-faint">Temporary password</dt>
+            <dd className="font-bold break-all tabular">{state.temporaryPassword}</dd>
+          </div>
+        </dl>
+        <div className="flex flex-wrap gap-2">
+          <CopyButton value={message} label="Copy sign-in message" />
+          <Button size="sm" onClick={() => setDismissed(state.nonce)}>
+            <UserPlus className="size-4" aria-hidden />
+            Add another
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex flex-col gap-3 rounded border border-gray-200 p-4">
-      <h2 className="text-sm font-semibold">Invite a staff member</h2>
-      <form action={formAction} className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1 text-xs">
-          Name
-          <input name="name" required className="rounded border border-gray-300 px-2 py-1 text-sm" />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Email
-          <input
-            name="email"
-            type="email"
-            required
-            className="rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Role
-          <select name="role" className="rounded border border-gray-300 px-2 py-1 text-sm">
-            {ROLES.filter((role) => canAssignOwner || role !== "BUSINESS_OWNER").map((role) => (
-              <option key={role} value={role}>
-                {role}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          Department (optional)
-          <select name="departmentId" className="rounded border border-gray-300 px-2 py-1 text-sm">
-            <option value="">None</option>
-            {departments.map((dept) => (
-              <option key={dept.id} value={dept.id}>
-                {dept.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="submit"
-          disabled={pending}
-          className="rounded bg-black px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
-        >
-          {pending ? "Inviting…" : "Invite"}
-        </button>
-      </form>
-
-      {state?.error && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{state.error}</p>
-      )}
-
-      {state && !state.error && (
-        <div className="rounded bg-amber-50 p-3 text-xs">
-          <p className="font-medium text-amber-800">
-            {state.name} ({state.email}) is set up. Share this temporary password with them —
-            it won&apos;t be shown again:
-          </p>
-          <p className="mt-1 break-all font-mono text-amber-700">{state.temporaryPassword}</p>
+    <form action={formAction} className="flex flex-col gap-4" key={state?.nonce ?? 0}>
+      {state?.error && <Alert tone="error">{state.error}</Alert>}
+      <Field label="Name" htmlFor="inv-name">
+        <Input id="inv-name" name="name" required maxLength={120} autoComplete="off" />
+      </Field>
+      <Field label="Email" htmlFor="inv-email">
+        <Input id="inv-email" name="email" type="email" required maxLength={254} autoComplete="off" />
+      </Field>
+      <fieldset>
+        <legend className="text-sm font-semibold">Role</legend>
+        <div className="mt-2 grid gap-2">
+          {ROLE_OPTIONS.filter((r) => canAssignOwner || r.value !== "BUSINESS_OWNER").map((r) => (
+            <label
+              key={r.value}
+              className="flex cursor-pointer items-center gap-3 rounded-[var(--radius-control)] border border-line-strong px-3 py-2.5 has-[:checked]:border-lagoon-600 has-[:checked]:bg-lagoon-50"
+            >
+              <input type="radio" name="role" value={r.value} defaultChecked={r.value === "STAFF"} className="size-4 accent-lagoon-700" />
+              <span>
+                <span className="block text-sm font-bold">{r.label}</span>
+                <span className="text-xs text-ink-faint">{r.hint}</span>
+              </span>
+            </label>
+          ))}
         </div>
-      )}
-    </div>
+      </fieldset>
+      <Field label="Department" htmlFor="inv-dept" optional hint="Staff see requests for their department.">
+        <Select id="inv-dept" name="departmentId" defaultValue="">
+          <option value="">None</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <SubmitButton pendingLabel="Adding">Add team member</SubmitButton>
+    </form>
   );
 }

@@ -120,3 +120,26 @@ export async function disableMembership(businessId: string, membershipId: string
     data: { status: "DISABLED" },
   });
 }
+
+/** An ACTIVE membership at this business by id, or null (tenant-scoped). */
+export async function getActiveMembershipById(businessId: string, membershipId: string) {
+  return prisma.businessMembership.findFirst({
+    where: { id: membershipId, businessId, status: "ACTIVE" },
+    include: { user: { select: { name: true } } },
+  });
+}
+
+export async function enableMembership(businessId: string, membershipId: string) {
+  return prisma.businessMembership.updateMany({
+    where: { id: membershipId, businessId, status: "DISABLED" },
+    data: { status: "ACTIVE" },
+  });
+}
+
+export async function getUserById(userId: string) {
+  return prisma.user.findUnique({ where: { id: userId } });
+}
+
+export async function setUserPasswordHash(userId: string, passwordHash: string) {
+  return prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+}

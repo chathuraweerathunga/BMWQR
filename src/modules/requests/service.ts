@@ -1,6 +1,18 @@
 import { assertAuthorized } from "@/modules/auth/authorize";
+import { getActiveMembershipById } from "@/modules/staff/repository";
 import type { Actor, GuestActor, StaffActor } from "@/modules/auth/types";
-import { NotFoundError, InvalidTransitionError } from "@/lib/errors";
+import { NotFoundError, InvalidTransitionError, ValidationError } from "@/lib/errors";
+import { getLocationById } from "@/modules/locations/repository";
+import { getStayById } from "@/modules/guest-stays/repository";
+import { getSessionWithLocation } from "@/modules/guest-sessions/repository";
+import {
+  computeDueAt,
+  MAX_REQUEST_DETAILS_LENGTH,
+  MAX_REQUEST_TITLE_LENGTH,
+  normalizeGuestText,
+  resolveGuestRequestLocation,
+  type GuestLocationChoice,
+} from "./guest-request-rules";
 import { getServiceById } from "@/modules/services/repository";
 import { logAudit } from "@/modules/audit/service";
 import { attemptTransition } from "./state-machine";
@@ -29,20 +41,23 @@ async function loadRequestOrThrow(businessId: string, requestId: string) {
 }
 
 export interface CreateGuestRequestInput {
-  locationId: string;
+  /** Which server-known location the guest wants help at. Never an id. */
+  where?: GuestLocationChoice | null;
   serviceId?: string | null;
-  departmentId?: string | null;
   title: string;
   description?: string | null;
-  priority?: "LOW" | "NORMAL" | "HIGH" | "URGENT";
 }
 
 /**
  * Creates a request on behalf of a guest. `actor` must be a `GuestActor`
- * derived server-side from a validated guest session (never from a
- * client-supplied guestId/guestStayId/businessId — project instructions
- * section 20). If `serviceId` is given but not `departmentId`, the
- * service's own department is used for routing.
+ * derived server-side from a validated guest session. Every id the request
+ * references is resolved or verified here, never taken from the client
+ * (project instructions section 20):
+ *   - location: the session's server-recorded QR scan location or the
+ *     stay's room, and it must be ACTIVE in this business
+ *   - service: must exist in this business and be active; its department
+ *     routes the request, its default priority and time estimate set
+ *     priority and due time
  */
 export async function createGuestRequest(actor: GuestActor, input: CreateGuestRequestInput) {
   assertAuthorized({
@@ -51,22 +66,40 @@ export async function createGuestRequest(actor: GuestActor, input: CreateGuestRe
     resource: { businessId: actor.businessId },
   });
 
-  let departmentId = input.departmentId ?? null;
-  if (input.serviceId && !departmentId) {
-    const service = await getServiceById(actor.businessId, input.serviceId);
-    if (!service) throw new NotFoundError("Service");
-    departmentId = service.departmentId;
+  const title = normalizeGuestText(input.title, MAX_REQUEST_TITLE_LENGTH);
+  if (!title) throw new ValidationError("MISSING_TITLE");
+  const description = normalizeGuestText(input.description, MAX_REQUEST_DETAILS_LENGTH);
+
+  const [session, stay] = await Promise.all([
+    getSessionWithLocation(actor.businessId, actor.guestSessionId),
+    getStayById(actor.businessId, actor.guestStayId),
+  ]);
+  if (!session || !stay) throw new NotFoundError("Guest stay");
+
+  const locationId = resolveGuestRequestLocation(input.where ?? null, {
+    scannedLocationId: session.currentLocationId,
+    stayLocationId: stay.locationId,
+  });
+  if (!locationId) throw new ValidationError("NO_LOCATION");
+  const location = await getLocationById(actor.businessId, locationId);
+  if (!location || location.status !== "ACTIVE") throw new ValidationError("LOCATION_UNAVAILABLE");
+
+  let service: Awaited<ReturnType<typeof getServiceById>> = null;
+  if (input.serviceId) {
+    service = await getServiceById(actor.businessId, input.serviceId);
+    if (!service || !service.isActive) throw new ValidationError("SERVICE_UNAVAILABLE");
   }
 
   return repo.createRequest({
     businessId: actor.businessId,
     guestStayId: actor.guestStayId,
-    locationId: input.locationId,
-    serviceId: input.serviceId ?? null,
-    departmentId,
-    title: input.title,
-    description: input.description ?? null,
-    priority: input.priority,
+    locationId: location.id,
+    serviceId: service?.id ?? null,
+    departmentId: service?.departmentId ?? null,
+    title,
+    description,
+    priority: service?.defaultPriority ?? "NORMAL",
+    dueAt: computeDueAt(service?.estimatedMinutes, new Date()),
     createdByGuestId: actor.guestId,
   });
 }
@@ -172,4 +205,46 @@ export function cancelRequest(
 ) {
   const action = actor.kind === "guest" ? "request:cancel_own" : "request:cancel_any";
   return transition(actor, businessId, requestId, action, "CANCELLED", note);
+}
+
+/**
+ * A manager assigning (or unassigning) a request to a team member
+ * (project instructions section 41: request assignment). Requires
+ * `request:reassign` (MANAGER+ in the base matrix). The target must hold
+ * an ACTIVE membership at the same business: looked up server-side,
+ * never trusted from the form.
+ */
+export async function assignRequest(
+  actor: StaffActor,
+  businessId: string,
+  requestId: string,
+  membershipId: string | null,
+) {
+  const request = await loadRequestOrThrow(businessId, requestId);
+  assertAuthorized({
+    actor,
+    action: "request:reassign",
+    resource: {
+      businessId: request.businessId,
+      departmentId: request.departmentId,
+      assignedMembershipId: request.assignedMembershipId,
+    },
+  });
+
+  if (membershipId) {
+    const target = await getActiveMembershipById(businessId, membershipId);
+    if (!target) throw new NotFoundError("Team member");
+  }
+
+  const result = await repo.setAssignment(businessId, requestId, membershipId);
+  if (result.count === 0) throw new InvalidTransitionError("TERMINAL_STATE");
+
+  await logAudit(actor, {
+    businessId,
+    action: "request.assigned",
+    entityType: "Request",
+    entityId: requestId,
+    oldValue: { assignedMembershipId: request.assignedMembershipId },
+    newValue: { assignedMembershipId: membershipId },
+  });
 }

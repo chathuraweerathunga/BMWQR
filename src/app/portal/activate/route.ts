@@ -21,7 +21,7 @@ const ACTIVATE_WINDOW_MS = 60_000;
  */
 export async function GET(request: NextRequest) {
   const ip = getClientIp(request.headers);
-  const limitResult = rateLimit(`portal-activate:${ip}`, ACTIVATE_LIMIT, ACTIVATE_WINDOW_MS);
+  const limitResult = await rateLimit(`portal-activate:${ip}`, ACTIVATE_LIMIT, ACTIVATE_WINDOW_MS);
   if (!limitResult.allowed) {
     return NextResponse.redirect(new URL("/portal?error=RATE_LIMITED", request.url));
   }

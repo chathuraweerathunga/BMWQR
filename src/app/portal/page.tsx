@@ -1,155 +1,145 @@
-import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getGuestPortalContext, GUEST_ERROR_MESSAGES } from "@/lib/guest-context";
-import { getGuestById } from "@/modules/guests/repository";
-import { getStayById } from "@/modules/guest-stays/repository";
+import type { Metadata } from "next";
+import { MapPin, MessageSquarePlus, Phone } from "lucide-react";
+import { loadGuestPortal } from "@/lib/guest-portal";
+import { GUEST_ERROR_MESSAGES } from "@/lib/guest-context";
 import { listActiveServicesForBusiness } from "@/modules/services/repository";
-import { createGuestRequest } from "@/modules/requests/service";
-import { rateLimit } from "@/lib/rate-limit";
+import { GuestNotice, GuestShell } from "@/components/guest/GuestShell";
+import { ServiceIcon } from "@/components/guest/ServiceIcon";
+import { Alert } from "@/components/ui/Alert";
+import { formatDate, formatTime } from "@/lib/format";
 
-const REQUEST_SUBMIT_LIMIT = 10;
-const REQUEST_SUBMIT_WINDOW_MS = 5 * 60_000;
+export const metadata: Metadata = { title: "Guest services", robots: { index: false } };
 
-const REQUEST_FORM_ERROR_MESSAGES: Record<string, string> = {
-  NO_LOCATION: "We don't know your location — scan the QR code in your room or area first.",
-  MISSING_TITLE: "Please describe what you need.",
-  RATE_LIMITED: "Too many requests — please wait a few minutes and try again.",
+const NOTICE_TITLE: Record<string, string> = {
+  GUEST_STAY_EXPIRED: "Thank you for staying",
+  RATE_LIMITED: "One moment",
+  BUSINESS_INACTIVE: "Services unavailable",
+  SIGNED_OUT: "Signed out",
 };
 
+function greeting(date: Date, timeZone: string): string {
+  const hour = Number(new Intl.DateTimeFormat("en-GB", { hour: "numeric", hourCycle: "h23", timeZone }).format(date));
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 /**
- * Minimal, functional guest portal — deliberately plain (no branding,
- * layout, or design polish yet; that's later milestone work). It exists
- * now to prove the check-in → activation → QR scan → request-creation
- * flow end to end. Every guest-facing decision here (session validity,
- * authorization, request creation) reuses the same modules the route
- * handlers use — nothing is re-implemented in the page itself.
+ * Guest services home: who we think you are, where we'll send help, and
+ * every service the property offers as a large tap target.
  */
 export default async function GuestPortalPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; location?: string; submitted?: string }>;
+  searchParams: Promise<{ error?: string; scanned?: string }>;
 }) {
-  const { error, location: scannedLocationId, submitted } = await searchParams;
-  const context = await getGuestPortalContext();
+  const { error, scanned } = await searchParams;
+  const result = await loadGuestPortal();
 
-  if (!context.ok) {
+  if (!result.ok) {
+    const code = error && GUEST_ERROR_MESSAGES[error] ? error : result.errorCode;
     return (
-      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-3 p-6 text-center">
-        <h1 className="text-lg font-semibold">Guest services</h1>
-        <p className="text-sm text-gray-600">
-          {GUEST_ERROR_MESSAGES[error ?? context.errorCode] ?? GUEST_ERROR_MESSAGES.NO_GUEST_SESSION}
-        </p>
-      </main>
+      <GuestNotice
+        title={NOTICE_TITLE[code] ?? "Guest services"}
+        message={GUEST_ERROR_MESSAGES[code] ?? GUEST_ERROR_MESSAGES.NO_GUEST_SESSION}
+      />
     );
   }
 
-  const { actor } = context;
-
-  const [guest, stay, services] = await Promise.all([
-    getGuestById(actor.businessId, actor.guestId),
-    getStayById(actor.businessId, actor.guestStayId),
-    listActiveServicesForBusiness(actor.businessId),
-  ]);
-
-  const effectiveLocationId = scannedLocationId ?? stay?.locationId ?? null;
-
-  async function submitRequest(formData: FormData) {
-    "use server";
-
-    // Keyed by the guest's own session — already authenticated, so this
-    // catches a single guest spamming requests without also penalizing an
-    // entire hotel sharing one NAT'd IP address (section 32: rate limiting
-    // / abuse detection).
-    const limitResult = rateLimit(
-      `request-create:${actor.guestSessionId}`,
-      REQUEST_SUBMIT_LIMIT,
-      REQUEST_SUBMIT_WINDOW_MS,
-    );
-    if (!limitResult.allowed) {
-      redirect("/portal?error=RATE_LIMITED");
-    }
-
-    const locationId = formData.get("locationId");
-    const serviceId = formData.get("serviceId");
-    const title = formData.get("title");
-    if (typeof locationId !== "string" || !locationId) {
-      redirect("/portal?error=NO_LOCATION");
-    }
-    if (typeof title !== "string" || !title.trim()) {
-      redirect("/portal?error=MISSING_TITLE");
-    }
-
-    await createGuestRequest(actor, {
-      locationId: locationId as string,
-      serviceId: typeof serviceId === "string" && serviceId ? serviceId : null,
-      title: title as string,
-    });
-
-    redirect("/portal?submitted=1");
-  }
+  const { portal } = result;
+  const services = await listActiveServicesForBusiness(portal.actor.businessId);
+  const tz = portal.branding.timezone;
+  const helpAt = portal.scannedLocation ?? portal.stayLocation;
+  const firstName = portal.guestName?.split(/\s+/)[0];
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col gap-6 p-6">
-      <header>
-        <h1 className="text-lg font-semibold">
-          Welcome{guest?.fullName ? `, ${guest.fullName}` : ""}
+    <GuestShell branding={portal.branding}>
+      <section className="pt-7">
+        <h1 className="font-display text-[32px] leading-tight text-ink">
+          {greeting(new Date(), tz)}
+          {firstName ? `, ${firstName}` : ""}
         </h1>
-        <p className="text-sm text-gray-500">How can we help?</p>
-      </header>
-
-      {submitted && (
-        <p className="rounded bg-green-50 px-3 py-2 text-sm text-green-700">
-          Request received — we&apos;ll let you know as soon as it&apos;s handled.
+        <p className="mt-2 text-[15px] leading-relaxed text-ink-soft">
+          {portal.branding.welcomeMessage ?? "What can we bring you, fix, or arrange?"}
         </p>
+      </section>
+
+      {error && GUEST_ERROR_MESSAGES[error] && (
+        <Alert tone="error" className="mt-5">
+          {GUEST_ERROR_MESSAGES[error]}
+        </Alert>
+      )}
+      {scanned && portal.scannedLocation && (
+        <Alert tone="success" className="mt-5">
+          You&apos;re at {portal.scannedLocation.name}. Requests will be sent there.
+        </Alert>
       )}
 
-      {error && REQUEST_FORM_ERROR_MESSAGES[error] && (
-        <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
-          {REQUEST_FORM_ERROR_MESSAGES[error]}
+      <div className="mt-5 flex items-center gap-3 rounded-[var(--radius-panel)] bg-[var(--brand-soft)] px-4 py-3">
+        <MapPin className="size-5 shrink-0 text-[var(--brand)]" aria-hidden />
+        <p className="min-w-0 flex-1 text-sm text-ink">
+          {helpAt ? (
+            <>
+              Help goes to <span className="font-bold">{helpAt.name}</span>
+            </>
+          ) : (
+            "Scan the QR code in your room so we know where to come."
+          )}
         </p>
-      )}
-
-      {!effectiveLocationId && (
-        <p className="rounded bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          Scan the QR code in your room or the area you&apos;re in so we know where to send help.
+        <p className="shrink-0 text-right text-xs text-ink-soft">
+          Checkout
+          <br />
+          <span className="font-semibold text-ink">
+            {formatDate(portal.checkOutAt, tz)}, {formatTime(portal.checkOutAt, tz)}
+          </span>
         </p>
-      )}
+      </div>
 
-      <form action={submitRequest} className="flex flex-col gap-3">
-        <input type="hidden" name="locationId" value={effectiveLocationId ?? ""} />
-        <label className="flex flex-col gap-1 text-sm">
-          Service
-          <select name="serviceId" className="rounded border border-gray-300 px-3 py-2">
-            <option value="">General request</option>
-            {services.map((service: { id: string; name: string }) => (
-              <option key={service.id} value={service.id}>
-                {service.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-sm">
-          What do you need?
-          <textarea
-            name="title"
-            required
-            rows={3}
-            placeholder="e.g. Two extra towels, please"
-            className="rounded border border-gray-300 px-3 py-2"
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={!effectiveLocationId}
-          className="rounded bg-black px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+      <section className="mt-8" aria-labelledby="services-heading">
+        <h2 id="services-heading" className="text-sm font-bold text-ink-soft">
+          Services
+        </h2>
+        <ul className="mt-3 grid grid-cols-2 gap-3">
+          {services.map((service: { id: string; name: string; icon: string | null; estimatedMinutes: number | null }) => (
+            <li key={service.id}>
+              <Link
+                href={`/portal/request/${service.id}`}
+                className="flex h-full min-h-32 flex-col justify-between gap-4 rounded-[var(--radius-panel)] border border-line bg-surface p-4 transition-colors hover:border-[var(--brand)] active:bg-sunken"
+              >
+                <span className="grid size-11 place-items-center rounded-full bg-[var(--brand-soft)] text-[var(--brand)]">
+                  <ServiceIcon icon={service.icon} name={service.name} className="size-[22px]" />
+                </span>
+                <span>
+                  <span className="block font-bold leading-snug text-ink">{service.name}</span>
+                  {service.estimatedMinutes ? (
+                    <span className="mt-0.5 block text-xs text-ink-faint">About {service.estimatedMinutes} min</span>
+                  ) : null}
+                </span>
+              </Link>
+            </li>
+          ))}
+          <li className={services.length % 2 === 0 ? "col-span-2" : undefined}>
+            <Link
+              href="/portal/request/other"
+              className="flex h-full min-h-20 items-center gap-3 rounded-[var(--radius-panel)] border border-dashed border-line-strong bg-surface p-4 hover:border-[var(--brand)]"
+            >
+              <MessageSquarePlus className="size-[22px] text-[var(--brand)]" aria-hidden />
+              <span className="font-bold text-ink">Something else</span>
+            </Link>
+          </li>
+        </ul>
+      </section>
+
+      {portal.branding.phone && (
+        <a
+          href={`tel:${portal.branding.phone.replace(/[^+\d]/g, "")}`}
+          className="mt-8 flex items-center justify-center gap-2 rounded-[var(--radius-panel)] border border-line bg-surface py-3.5 text-sm font-semibold text-ink"
         >
-          Send request
-        </button>
-      </form>
-
-      <Link href="/portal/feedback" className="text-center text-sm text-gray-500 underline">
-        Leave feedback about your stay
-      </Link>
-    </main>
+          <Phone className="size-4" aria-hidden />
+          Call reception
+        </a>
+      )}
+    </GuestShell>
   );
 }
