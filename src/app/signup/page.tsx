@@ -82,6 +82,14 @@ export default async function SignUpPage({
       if (err instanceof ValidationError) {
         redirect(`/signup?error=${encodeURIComponent(err.message)}`);
       }
+      // TEMPORARY DIAGNOSTIC: surface the real error on the page instead of
+      // Next.js's generic digest-only production error, since server logs
+      // aren't reachable right now. Revert once the underlying bug is found.
+      if (err instanceof Error && err.message !== "NEXT_REDIRECT") {
+        redirect(
+          `/signup?error=${encodeURIComponent(`[step1:${err.constructor.name}] ${err.message}`)}`,
+        );
+      }
       throw err;
     }
 
@@ -97,6 +105,12 @@ export default async function SignUpPage({
         // sign-in step failed for some reason — send them to sign in
         // manually rather than losing the "you're all set" moment.
         redirect(`/login?next=/${slug}/dashboard`);
+      }
+      // TEMPORARY DIAGNOSTIC: see comment above.
+      if (err instanceof Error) {
+        redirect(
+          `/signup?error=${encodeURIComponent(`[step2:${err.constructor.name}] ${err.message}`)}`,
+        );
       }
       throw err;
     }
