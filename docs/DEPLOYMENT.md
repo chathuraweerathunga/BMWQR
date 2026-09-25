@@ -14,6 +14,10 @@ Postgres database. This is the checklist, in order.
      hashes and guest data) is readable and writable by anyone holding the
      project's public anon key through Supabase's auto-generated REST API.
    - `20260925000100_guest_session_current_location`
+   - `20260925000200_app_role_access` — lets the dedicated `oneweb_app`
+     database role (which the app connects as) through row-level security.
+     Create the role first if it doesn't exist:
+     `CREATE ROLE oneweb_app WITH LOGIN PASSWORD '<random>';`
 2. Check **Advisors → Security** in the Supabase dashboard. The only
    remaining note should be *"RLS enabled, no policy"* (INFO) on each table.
    That is intended: OneWeb never uses the Supabase REST API, so nothing
@@ -27,7 +31,7 @@ migrations are applied as plain SQL.
 
 | Variable | Value |
 | --- | --- |
-| `DATABASE_URL` | Supabase → Project Settings → Database → Connection string → **Transaction pooler**. Put your database password in it. (The app uses the node-postgres driver adapter, which works with the pooler as-is.) |
+| `DATABASE_URL` | The Supabase **Transaction pooler** string, but with the `oneweb_app` role instead of `postgres`: `postgresql://oneweb_app.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres`. Copy the host from Supabase → **Connect** → Transaction pooler. Don't add `?sslmode=require`: node-postgres then rejects Supabase's certificate. |
 | `AUTH_SECRET` | `openssl rand -base64 32` |
 | `APP_URL` | Your production origin, e.g. `https://oneweb.vercel.app` (no trailing slash). Guest activation links and printed QR codes point here, so set it before printing codes. |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | From an Upstash Redis database (free tier is fine). Makes rate limits shared across Vercel's instances. Optional, but without it limits are per instance. |
